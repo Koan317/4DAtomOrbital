@@ -133,3 +133,7 @@ class ProjectionViewWidget(QtWidgets.QWidget):
         faces_pv = np.hstack([np.full((faces.shape[0], 1), 3), faces]).astype(np.int64).ravel()
         mesh = pv.PolyData(verts, faces_pv)
         self.plotter.add_mesh(mesh, color=color, opacity=opacity, smooth_shading=True)
+
+    def closeEvent(self, event: QtGui.QCloseEvent) -> None:
+        self.plotter.close()
+        super().closeEvent(event)

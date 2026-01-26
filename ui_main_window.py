@@ -236,6 +236,13 @@ class MainWindow(QtWidgets.QMainWindow):
     def _on_render_now(self) -> None:
         self.render_all_views()
 
+    def closeEvent(self, event: QtGui.QCloseEvent) -> None:
+        if self._render_timer.isActive():
+            self._render_timer.stop()
+        for view in self.projection_views.values():
+            view.plotter.close()
+        super().closeEvent(event)
+
     def on_ui_changed(self) -> None:
         if not self._ready:
             return
