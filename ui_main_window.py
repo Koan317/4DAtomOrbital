@@ -18,6 +18,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.state = AppState()
         self._ready = False
         self._extent = 6.0
+        self._render_timer = QtCore.QTimer(self)
+        self._render_timer.setSingleShot(True)
+        self._render_timer.timeout.connect(self.render_all_views)
 
         self._build_menu()
         self._build_status_bar()
@@ -249,9 +252,12 @@ class MainWindow(QtWidgets.QMainWindow):
         self.log_panel.appendPlainText(self.state.log_line())
 
         if self.state.live_update:
-            self.render_all_views()
+            self._schedule_render()
 
     def render_all_views(self) -> None:
+        if not self.isVisible():
+            return
+
         mode = self.state.projection_mode
         mode_label = "slice" if mode.startswith("slice") else mode
         iso_percent = self.state.iso_percent
@@ -274,6 +280,11 @@ class MainWindow(QtWidgets.QMainWindow):
             self.projection_views[view_id].set_volume_and_render(vol, iso_value, opacity)
 
         self.log_panel.appendPlainText("Render done: View X/Y/Z/W updated")
+
+    def _schedule_render(self) -> None:
+        if self._render_timer.isActive():
+            return
+        self._render_timer.start(30)
 
     def _generate_slice_volume(self, view_id: str, resolution: int) -> np.ndarray:
         coords = np.linspace(-self._extent, self._extent, resolution)

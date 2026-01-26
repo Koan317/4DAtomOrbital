@@ -86,6 +86,9 @@ class ProjectionViewWidget(QtWidgets.QWidget):
         layout.addWidget(self.plotter, 1)
 
     def set_volume_and_render(self, vol: np.ndarray, iso_value: float, opacity: float) -> None:
+        if not self.isVisible():
+            return
+
         self.plotter.clear()
 
         if vol.size == 0 or iso_value <= 0:
