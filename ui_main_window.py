@@ -426,6 +426,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._cancel_event: threading.Event | None = None
         self._render_thread: QtCore.QThread | None = None
         self._render_worker: RenderWorker | None = None
+        self._retired_threads: list[tuple[QtCore.QThread, RenderWorker, threading.Event]] = []
         self._last_params: dict | None = None
 
         self._build_menu()
@@ -702,9 +703,14 @@ class MainWindow(QtWidgets.QMainWindow):
             self._render_timer.stop()
         if self._cancel_event is not None:
             self._cancel_event.set()
-        if self._render_thread is not None and self._render_thread.isRunning():
+        if (
+            self._render_thread is not None
+            and isValid(self._render_thread)
+            and self._render_thread.isRunning()
+        ):
             self._render_thread.quit()
             self._render_thread.wait(1000)
+        self._cleanup_retired_threads(force=True)
         for view in self.projection_views.values():
             view.plotter.close()
         super().closeEvent(event)
@@ -839,15 +845,20 @@ class MainWindow(QtWidgets.QMainWindow):
         if not self.isVisible():
             return
 
-        if self._cancel_event is not None:
-            self._cancel_event.set()
         if (
             self._render_thread is not None
+            and self._render_worker is not None
+            and self._cancel_event is not None
             and isValid(self._render_thread)
-            and self._render_thread.isRunning()
         ):
-            self._render_thread.quit()
-            self._render_thread.wait(250)
+            if self._cancel_event is not None:
+                self._cancel_event.set()
+            if self._render_thread.isRunning():
+                self._render_thread.quit()
+                self._render_thread.wait(10)
+            self._retired_threads.append(
+                (self._render_thread, self._render_worker, self._cancel_event)
+            )
 
         self._render_request_id += 1
         request_id = self._render_request_id
@@ -873,7 +884,7 @@ class MainWindow(QtWidgets.QMainWindow):
             f"Render#{request_id} queued ({quality_label}, reason={reason})"
         )
 
-        self._render_thread = QtCore.QThread()
+        self._render_thread = QtCore.QThread(self)
         self._render_worker = RenderWorker(
             request_id,
             params,
@@ -951,6 +962,24 @@ class MainWindow(QtWidgets.QMainWindow):
     def _on_render_thread_finished(self) -> None:
         self._render_thread = None
         self._render_worker = None
+        self._cleanup_retired_threads(force=False)
+
+    def _cleanup_retired_threads(self, force: bool) -> None:
+        remaining: list[tuple[QtCore.QThread, RenderWorker, threading.Event]] = []
+        for thread, worker, cancel_event in self._retired_threads:
+            if not isValid(thread):
+                continue
+            if force:
+                cancel_event.set()
+                if thread.isRunning():
+                    thread.quit()
+                    thread.wait(1000)
+                continue
+            if thread.isRunning():
+                remaining.append((thread, worker, cancel_event))
+            else:
+                thread.quit()
+        self._retired_threads = remaining
 
     def _apply_opacity_only(self) -> None:
         opacity = self.state.opacity_percent / 100.0
