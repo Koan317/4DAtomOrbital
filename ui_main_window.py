@@ -9,6 +9,78 @@ from ui_widgets import (
 )
 
 
+def _rotation_matrix_xy(theta_deg: float) -> np.ndarray:
+    theta = np.deg2rad(theta_deg)
+    c = np.cos(theta)
+    s = np.sin(theta)
+    mat = np.eye(4, dtype=np.float64)
+    mat[0, 0] = c
+    mat[0, 1] = -s
+    mat[1, 0] = s
+    mat[1, 1] = c
+    return mat
+
+
+def _rotation_matrix_xz(theta_deg: float) -> np.ndarray:
+    theta = np.deg2rad(theta_deg)
+    c = np.cos(theta)
+    s = np.sin(theta)
+    mat = np.eye(4, dtype=np.float64)
+    mat[0, 0] = c
+    mat[0, 2] = -s
+    mat[2, 0] = s
+    mat[2, 2] = c
+    return mat
+
+
+def _rotation_matrix_xw(theta_deg: float) -> np.ndarray:
+    theta = np.deg2rad(theta_deg)
+    c = np.cos(theta)
+    s = np.sin(theta)
+    mat = np.eye(4, dtype=np.float64)
+    mat[0, 0] = c
+    mat[0, 3] = -s
+    mat[3, 0] = s
+    mat[3, 3] = c
+    return mat
+
+
+def _rotation_matrix_yz(theta_deg: float) -> np.ndarray:
+    theta = np.deg2rad(theta_deg)
+    c = np.cos(theta)
+    s = np.sin(theta)
+    mat = np.eye(4, dtype=np.float64)
+    mat[1, 1] = c
+    mat[1, 2] = -s
+    mat[2, 1] = s
+    mat[2, 2] = c
+    return mat
+
+
+def _rotation_matrix_yw(theta_deg: float) -> np.ndarray:
+    theta = np.deg2rad(theta_deg)
+    c = np.cos(theta)
+    s = np.sin(theta)
+    mat = np.eye(4, dtype=np.float64)
+    mat[1, 1] = c
+    mat[1, 3] = -s
+    mat[3, 1] = s
+    mat[3, 3] = c
+    return mat
+
+
+def _rotation_matrix_zw(theta_deg: float) -> np.ndarray:
+    theta = np.deg2rad(theta_deg)
+    c = np.cos(theta)
+    s = np.sin(theta)
+    mat = np.eye(4, dtype=np.float64)
+    mat[2, 2] = c
+    mat[2, 3] = -s
+    mat[3, 2] = s
+    mat[3, 3] = c
+    return mat
+
+
 class MainWindow(QtWidgets.QMainWindow):
     def __init__(self) -> None:
         super().__init__()
@@ -272,8 +344,19 @@ class MainWindow(QtWidgets.QMainWindow):
         resolution = self.state.resolution
 
         self.log_panel.appendPlainText(
-            f"Render: N={resolution}, L={self._extent:.1f}, iso={iso_percent}%, "
-            f"opacity={self.state.opacity_percent}%, mode={mode_label}"
+            "Render: orbital={orbital}, angles=[xy={xy},xz={xz},xw={xw},"
+            "yz={yz},yw={yw},zw={zw}], N={res}, iso={iso}%, opacity={opacity}%".format(
+                orbital=self.state.orbital_name,
+                xy=self.state.angles["xy"],
+                xz=self.state.angles["xz"],
+                xw=self.state.angles["xw"],
+                yz=self.state.angles["yz"],
+                yw=self.state.angles["yw"],
+                zw=self.state.angles["zw"],
+                res=resolution,
+                iso=iso_percent,
+                opacity=self.state.opacity_percent,
+            )
         )
 
         if not mode.startswith("slice"):
@@ -282,6 +365,11 @@ class MainWindow(QtWidgets.QMainWindow):
 
         for view_id in ["X", "Y", "Z", "W"]:
             vol = self._generate_slice_volume(view_id, resolution)
+            if vol.size and not np.isfinite(vol).all():
+                self.log_panel.appendPlainText(
+                    f"Warning: NaN/Inf detected in volume for view {view_id}; clearing volume."
+                )
+                vol = np.array([])
             max_abs = float(np.max(np.abs(vol))) if vol.size else 0.0
             iso_value = (iso_percent / 100.0) * max_abs if iso_percent > 0 else 0.0
             self.projection_views[view_id].set_volume_and_render(vol, iso_value, opacity)
@@ -310,5 +398,26 @@ class MainWindow(QtWidgets.QMainWindow):
             w = np.zeros_like(grid_a)
             x, y, z = grid_a, grid_b, grid_c
 
-        r = np.sqrt(x**2 + y**2 + z**2 + w**2)
-        return np.exp(-r) * (x**2 - y**2 + 0.35 * z - 0.25 * w)
+        rotation = self._compose_rotation_matrix()
+        points = np.stack(
+            [x.reshape(-1), y.reshape(-1), z.reshape(-1), w.reshape(-1)], axis=0
+        )
+        rotated = rotation @ points
+        xr = rotated[0].reshape(x.shape)
+        yr = rotated[1].reshape(y.shape)
+        zr = rotated[2].reshape(z.shape)
+        wr = rotated[3].reshape(w.shape)
+
+        r = np.sqrt(xr**2 + yr**2 + zr**2 + wr**2)
+        return np.exp(-r) * (xr**2 - yr**2 + 0.35 * zr - 0.25 * wr)
+
+    def _compose_rotation_matrix(self) -> np.ndarray:
+        angles = self.state.angles
+        return (
+            _rotation_matrix_zw(angles["zw"])
+            @ _rotation_matrix_yw(angles["yw"])
+            @ _rotation_matrix_yz(angles["yz"])
+            @ _rotation_matrix_xw(angles["xw"])
+            @ _rotation_matrix_xz(angles["xz"])
+            @ _rotation_matrix_xy(angles["xy"])
+        )
