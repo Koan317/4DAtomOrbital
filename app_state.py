@@ -20,6 +20,9 @@ class AppState:
     resolution: int = 64
     integral_samples: int = 32
     live_update: bool = True
+    auto_refine: bool = True
+    preview_quality: str = "Fast"
+    final_quality: str = "High"
 
     def angle_summary(self) -> str:
         return ",".join(
@@ -37,5 +40,6 @@ class AppState:
         return (
             f"Orbital={self.orbital_name}, angles=[{self.angle_summary()}], "
             f"mode={self.projection_mode}, iso={self.iso_percent}%, "
-            f"opacity={self.opacity_percent}%, res={self.resolution}"
+            f"opacity={self.opacity_percent}%, res={self.resolution}, "
+            f"samples={self.integral_samples}, auto_refine={self.auto_refine}"
         )

@@ -1,6 +1,5 @@
 from PySide6 import QtCore, QtGui, QtWidgets
 from pyvistaqt import QtInteractor
-from skimage import measure
 import numpy as np
 import pyvista as pv
 
@@ -71,6 +70,7 @@ class ProjectionViewWidget(QtWidgets.QWidget):
     def __init__(self, title: str, extent: float = 6.0) -> None:
         super().__init__()
         self._extent = extent
+        self._mesh_actors: dict[str, pv.Actor] = {}
 
         layout = QtWidgets.QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -85,54 +85,53 @@ class ProjectionViewWidget(QtWidgets.QWidget):
         self.plotter.set_background("#111111")
         layout.addWidget(self.plotter, 1)
 
-    def set_volume_and_render(self, vol: np.ndarray, iso_value: float, opacity: float) -> None:
+    def set_meshes(
+        self,
+        positive_mesh: tuple[np.ndarray, np.ndarray] | None,
+        negative_mesh: tuple[np.ndarray, np.ndarray] | None,
+        opacity: float,
+    ) -> None:
         if not self.isVisible():
             return
 
         self.plotter.clear()
+        self._mesh_actors.clear()
 
-        if vol.size == 0 or iso_value <= 0:
-            self.plotter.render()
-            return
+        if positive_mesh is not None:
+            actor = self._add_mesh(positive_mesh, color="#4fc3f7", opacity=opacity)
+            if actor is not None:
+                self._mesh_actors["positive"] = actor
 
-        spacing = (2 * self._extent) / max(vol.shape[0] - 1, 1)
-        origin = np.array([-self._extent, -self._extent, -self._extent], dtype=float)
-        vmin = float(vol.min())
-        vmax = float(vol.max())
-
-        self._add_isosurface(vol, iso_value, spacing, origin, vmax, color="#4fc3f7", opacity=opacity)
-        self._add_isosurface(vol, -iso_value, spacing, origin, vmin, color="#f06292", opacity=opacity)
+        if negative_mesh is not None:
+            actor = self._add_mesh(negative_mesh, color="#f06292", opacity=opacity)
+            if actor is not None:
+                self._mesh_actors["negative"] = actor
 
         self.plotter.reset_camera()
         self.plotter.render()
 
-    def _add_isosurface(
+    def _add_mesh(
         self,
-        vol: np.ndarray,
-        level: float,
-        spacing: float,
-        origin: np.ndarray,
-        bound: float,
+        mesh_data: tuple[np.ndarray, np.ndarray],
         color: str,
         opacity: float,
-    ) -> None:
-        if (level > 0 and level > bound) or (level < 0 and level < bound):
-            return
-
-        try:
-            verts, faces, _, _ = measure.marching_cubes(
-                vol,
-                level=level,
-                spacing=(spacing, spacing, spacing),
-            )
-        except RuntimeError:
-            return
+    ) -> pv.Actor | None:
+        verts, faces = mesh_data
         if verts.size == 0 or faces.size == 0:
-            return
-        verts = verts + origin
+            return None
         faces_pv = np.hstack([np.full((faces.shape[0], 1), 3), faces]).astype(np.int64).ravel()
         mesh = pv.PolyData(verts, faces_pv)
-        self.plotter.add_mesh(mesh, color=color, opacity=opacity, smooth_shading=True)
+        return self.plotter.add_mesh(mesh, color=color, opacity=opacity, smooth_shading=True)
+
+    def set_opacity(self, opacity: float) -> None:
+        if not self.isVisible():
+            return
+        for actor in self._mesh_actors.values():
+            try:
+                actor.GetProperty().SetOpacity(opacity)
+            except AttributeError:
+                continue
+        self.plotter.render()
 
     def closeEvent(self, event: QtGui.QCloseEvent) -> None:
         self.plotter.close()
