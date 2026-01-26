@@ -119,7 +119,14 @@ class ProjectionViewWidget(QtWidgets.QWidget):
         if (level > 0 and level > bound) or (level < 0 and level < bound):
             return
 
-        verts, faces, _, _ = measure.marching_cubes(vol, level=level, spacing=(spacing, spacing, spacing))
+        try:
+            verts, faces, _, _ = measure.marching_cubes(
+                vol,
+                level=level,
+                spacing=(spacing, spacing, spacing),
+            )
+        except RuntimeError:
+            return
         if verts.size == 0 or faces.size == 0:
             return
         verts = verts + origin
