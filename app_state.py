@@ -15,10 +15,10 @@ class AppState:
         }
     )
     projection_mode: str = "slice (fast)"
-    isosurface_level: int = 0
-    opacity: int = 0
-    resolution: str = "64"
-    integral_samples: str = "32"
+    iso_percent: int = 0
+    opacity_percent: int = 0
+    resolution: int = 64
+    integral_samples: int = 32
     live_update: bool = True
 
     def angle_summary(self) -> str:
@@ -36,6 +36,6 @@ class AppState:
     def log_line(self) -> str:
         return (
             f"Orbital={self.orbital_name}, angles=[{self.angle_summary()}], "
-            f"mode={self.projection_mode}, iso={self.isosurface_level}%, "
-            f"opacity={self.opacity}%"
+            f"mode={self.projection_mode}, iso={self.iso_percent}%, "
+            f"opacity={self.opacity_percent}%, res={self.resolution}"
         )

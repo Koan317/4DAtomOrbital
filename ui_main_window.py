@@ -1,7 +1,12 @@
+import numpy as np
 from PySide6 import QtCore, QtGui, QtWidgets
 
 from app_state import AppState
-from ui_widgets import build_labeled_slider, build_placeholder_panel, build_title_label
+from ui_widgets import (
+    ProjectionViewWidget,
+    build_labeled_slider,
+    build_title_label,
+)
 
 
 class MainWindow(QtWidgets.QMainWindow):
@@ -12,6 +17,10 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self.state = AppState()
         self._ready = False
+        self._extent = 6.0
+        self._render_timer = QtCore.QTimer(self)
+        self._render_timer.setSingleShot(True)
+        self._render_timer.timeout.connect(self.render_all_views)
 
         self._build_menu()
         self._build_status_bar()
@@ -75,17 +84,17 @@ class MainWindow(QtWidgets.QMainWindow):
         layout = QtWidgets.QGridLayout(panel)
         layout.setSpacing(10)
 
-        panels = [
-            build_placeholder_panel("Projection X (to YZW)"),
-            build_placeholder_panel("Projection Y (to XZW)"),
-            build_placeholder_panel("Projection Z (to XYW)"),
-            build_placeholder_panel("Projection W (to XYZ)"),
-        ]
+        self.projection_views = {
+            "X": ProjectionViewWidget("Projection X (to YZW)", extent=self._extent),
+            "Y": ProjectionViewWidget("Projection Y (to XZW)", extent=self._extent),
+            "Z": ProjectionViewWidget("Projection Z (to XYW)", extent=self._extent),
+            "W": ProjectionViewWidget("Projection W (to XYZ)", extent=self._extent),
+        }
 
-        layout.addWidget(panels[0], 0, 0)
-        layout.addWidget(panels[1], 0, 1)
-        layout.addWidget(panels[2], 1, 0)
-        layout.addWidget(panels[3], 1, 1)
+        layout.addWidget(self.projection_views["X"], 0, 0)
+        layout.addWidget(self.projection_views["Y"], 0, 1)
+        layout.addWidget(self.projection_views["Z"], 1, 0)
+        layout.addWidget(self.projection_views["W"], 1, 1)
 
         layout.setRowStretch(0, 1)
         layout.setRowStretch(1, 1)
@@ -163,6 +172,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.reset_button = QtWidgets.QPushButton("Reset Angles")
         self.reset_button.clicked.connect(self._reset_angles)
 
+        self.render_button = QtWidgets.QPushButton("Render Now")
+        self.render_button.clicked.connect(self._on_render_now)
+
         layout.addWidget(QtWidgets.QLabel("Projection Mode"))
         layout.addWidget(self.projection_mode)
 
@@ -188,6 +200,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
         layout.addWidget(self.live_update)
         layout.addWidget(self.reset_button)
+        layout.addWidget(self.render_button)
 
         self.log_panel = QtWidgets.QPlainTextEdit()
         self.log_panel.setReadOnly(True)
@@ -206,12 +219,12 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _on_isosurface_changed(self, value: int) -> None:
         self.isosurface_value.setText(f"{value}%")
-        self.state.isosurface_level = value
+        self.state.iso_percent = value
         self.on_ui_changed()
 
     def _on_opacity_changed(self, value: int) -> None:
         self.opacity_value.setText(f"{value}%")
-        self.state.opacity = value
+        self.state.opacity_percent = value
         self.on_ui_changed()
 
     def _reset_angles(self) -> None:
@@ -220,13 +233,23 @@ class MainWindow(QtWidgets.QMainWindow):
             self.state.angles[name] = 0
         self.on_ui_changed()
 
+    def _on_render_now(self) -> None:
+        self.render_all_views()
+
+    def closeEvent(self, event: QtGui.QCloseEvent) -> None:
+        if self._render_timer.isActive():
+            self._render_timer.stop()
+        for view in self.projection_views.values():
+            view.plotter.close()
+        super().closeEvent(event)
+
     def on_ui_changed(self) -> None:
         if not self._ready:
             return
 
         self.state.projection_mode = self.projection_mode.currentText()
-        self.state.resolution = self.resolution_combo.currentText()
-        self.state.integral_samples = self.samples_combo.currentText()
+        self.state.resolution = int(self.resolution_combo.currentText())
+        self.state.integral_samples = int(self.samples_combo.currentText())
         self.state.live_update = self.live_update.isChecked()
 
         if self.orbital_list.currentItem() is not None:
@@ -234,3 +257,58 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self.status_bar.showMessage(self.state.status_text())
         self.log_panel.appendPlainText(self.state.log_line())
+
+        if self.state.live_update:
+            self._schedule_render()
+
+    def render_all_views(self) -> None:
+        if not self.isVisible():
+            return
+
+        mode = self.state.projection_mode
+        mode_label = "slice" if mode.startswith("slice") else mode
+        iso_percent = self.state.iso_percent
+        opacity = self.state.opacity_percent / 100.0
+        resolution = self.state.resolution
+
+        self.log_panel.appendPlainText(
+            f"Render: N={resolution}, L={self._extent:.1f}, iso={iso_percent}%, "
+            f"opacity={self.state.opacity_percent}%, mode={mode_label}"
+        )
+
+        if not mode.startswith("slice"):
+            self.log_panel.appendPlainText(f"Render skipped: mode '{mode}' not implemented yet.")
+            return
+
+        for view_id in ["X", "Y", "Z", "W"]:
+            vol = self._generate_slice_volume(view_id, resolution)
+            max_abs = float(np.max(np.abs(vol))) if vol.size else 0.0
+            iso_value = (iso_percent / 100.0) * max_abs if iso_percent > 0 else 0.0
+            self.projection_views[view_id].set_volume_and_render(vol, iso_value, opacity)
+
+        self.log_panel.appendPlainText("Render done: View X/Y/Z/W updated")
+
+    def _schedule_render(self) -> None:
+        if self._render_timer.isActive():
+            return
+        self._render_timer.start(30)
+
+    def _generate_slice_volume(self, view_id: str, resolution: int) -> np.ndarray:
+        coords = np.linspace(-self._extent, self._extent, resolution)
+        grid_a, grid_b, grid_c = np.meshgrid(coords, coords, coords, indexing="ij")
+
+        if view_id == "X":
+            x = np.zeros_like(grid_a)
+            y, z, w = grid_a, grid_b, grid_c
+        elif view_id == "Y":
+            y = np.zeros_like(grid_a)
+            x, z, w = grid_a, grid_b, grid_c
+        elif view_id == "Z":
+            z = np.zeros_like(grid_a)
+            x, y, w = grid_a, grid_b, grid_c
+        else:
+            w = np.zeros_like(grid_a)
+            x, y, z = grid_a, grid_b, grid_c
+
+        r = np.sqrt(x**2 + y**2 + z**2 + w**2)
+        return np.exp(-r) * (x**2 - y**2 + 0.35 * z - 0.25 * w)
