@@ -1,4 +1,7 @@
+import numpy as np
+import pyvista as pv
 from PySide6 import QtCore, QtGui, QtWidgets
+from pyvistaqt import QtInteractor
 
 
 def build_title_label(text: str) -> QtWidgets.QLabel:
@@ -26,6 +29,70 @@ def build_placeholder_panel(title: str) -> QtWidgets.QWidget:
     layout.addWidget(title_label)
     layout.addWidget(placeholder, 1)
     return panel
+
+
+class ProjectionViewWidget(QtWidgets.QWidget):
+    def __init__(self, title: str, extent: float) -> None:
+        super().__init__()
+        self._extent = float(extent)
+        layout = QtWidgets.QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(6)
+
+        title_label = QtWidgets.QLabel(title)
+        title_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignLeft)
+        title_label.setStyleSheet("color: #dddddd;")
+        layout.addWidget(title_label)
+
+        self.plotter = QtInteractor(self)
+        self.plotter.set_background("#101010")
+        layout.addWidget(self.plotter.interactor, 1)
+
+        self._actor_positive = None
+        self._actor_negative = None
+
+    def _build_grid(self, volume: np.ndarray) -> pv.UniformGrid:
+        shape = volume.shape
+        grid = pv.UniformGrid()
+        grid.dimensions = shape
+        spacing = (
+            (2 * self._extent) / (shape[0] - 1),
+            (2 * self._extent) / (shape[1] - 1),
+            (2 * self._extent) / (shape[2] - 1),
+        )
+        grid.origin = (-self._extent, -self._extent, -self._extent)
+        grid.spacing = spacing
+        grid["values"] = volume.ravel(order="F")
+        return grid
+
+    def set_volume_and_render(self, volume: np.ndarray, iso_value: float, opacity: float) -> None:
+        self.plotter.clear()
+
+        if iso_value <= 0:
+            self.plotter.render()
+            return
+
+        grid = self._build_grid(volume)
+        positive = grid.contour([iso_value])
+        negative = grid.contour([-iso_value])
+
+        if positive.n_points > 0:
+            self._actor_positive = self.plotter.add_mesh(
+                positive,
+                color="#5dade2",
+                opacity=opacity,
+                specular=0.3,
+            )
+        if negative.n_points > 0:
+            self._actor_negative = self.plotter.add_mesh(
+                negative,
+                color="#e67e22",
+                opacity=opacity,
+                specular=0.3,
+            )
+
+        self.plotter.reset_camera()
+        self.plotter.render()
 
 
 def build_labeled_slider(
