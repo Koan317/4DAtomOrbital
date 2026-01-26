@@ -1,3 +1,4 @@
+import time
 import numpy as np
 from PySide6 import QtCore, QtGui, QtWidgets
 
@@ -342,29 +343,30 @@ class MainWindow(QtWidgets.QMainWindow):
         iso_percent = self.state.iso_percent
         opacity = self.state.opacity_percent / 100.0
         resolution = self.state.resolution
+        samples = self.state.integral_samples
+        extent = self._extent
 
         self.log_panel.appendPlainText(
-            "Render: orbital={orbital}, angles=[xy={xy},xz={xz},xw={xw},"
-            "yz={yz},yw={yw},zw={zw}], N={res}, iso={iso}%, opacity={opacity}%".format(
-                orbital=self.state.orbital_name,
-                xy=self.state.angles["xy"],
-                xz=self.state.angles["xz"],
-                xw=self.state.angles["xw"],
-                yz=self.state.angles["yz"],
-                yw=self.state.angles["yw"],
-                zw=self.state.angles["zw"],
+            "Render start: mode={mode}, N={res}, L={extent}, samples={samples}, "
+            "iso={iso}%, opacity={opacity}%".format(
+                mode=mode_label,
                 res=resolution,
+                extent=extent,
+                samples=samples,
                 iso=iso_percent,
                 opacity=self.state.opacity_percent,
             )
         )
 
-        if not mode.startswith("slice"):
-            self.log_panel.appendPlainText(f"Render skipped: mode '{mode}' not implemented yet.")
-            return
-
         for view_id in ["X", "Y", "Z", "W"]:
-            vol = self._generate_slice_volume(view_id, resolution)
+            if mode.startswith("slice"):
+                vol = self._generate_slice_volume(view_id, resolution)
+            else:
+                start_time = time.perf_counter()
+                vol = self._generate_integral_volume(view_id, resolution, mode)
+                elapsed_ms = int((time.perf_counter() - start_time) * 1000)
+                self.log_panel.appendPlainText(f"Compute volume {view_id}: {elapsed_ms} ms")
+
             if vol.size and not np.isfinite(vol).all():
                 self.log_panel.appendPlainText(
                     f"Warning: NaN/Inf detected in volume for view {view_id}; clearing volume."
@@ -373,8 +375,9 @@ class MainWindow(QtWidgets.QMainWindow):
             max_abs = float(np.max(np.abs(vol))) if vol.size else 0.0
             iso_value = (iso_percent / 100.0) * max_abs if iso_percent > 0 else 0.0
             self.projection_views[view_id].set_volume_and_render(vol, iso_value, opacity)
+            self.log_panel.appendPlainText(f"Render view {view_id} done")
 
-        self.log_panel.appendPlainText("Render done: View X/Y/Z/W updated")
+        self.log_panel.appendPlainText("Render finished")
 
     def _schedule_render(self) -> None:
         if self._render_timer.isActive():
@@ -410,6 +413,72 @@ class MainWindow(QtWidgets.QMainWindow):
 
         r = np.sqrt(xr**2 + yr**2 + zr**2 + wr**2)
         return np.exp(-r) * (xr**2 - yr**2 + 0.35 * zr - 0.25 * wr)
+
+    def _generate_integral_volume(self, view_id: str, resolution: int, mode: str) -> np.ndarray:
+        coords = np.linspace(-self._extent, self._extent, resolution)
+        grid_a, grid_b, grid_c = np.meshgrid(coords, coords, coords, indexing="ij")
+
+        if view_id == "X":
+            axis_label = "x"
+            y, z, w = grid_a, grid_b, grid_c
+        elif view_id == "Y":
+            axis_label = "y"
+            x, z, w = grid_a, grid_b, grid_c
+        elif view_id == "Z":
+            axis_label = "z"
+            x, y, w = grid_a, grid_b, grid_c
+        else:
+            axis_label = "w"
+            x, y, z = grid_a, grid_b, grid_c
+
+        nodes, weights = np.polynomial.legendre.leggauss(self.state.integral_samples)
+        nodes = nodes * self._extent
+        weights = weights * self._extent
+
+        grid_flat = grid_a.reshape(-1)
+        if view_id == "X":
+            y_flat, z_flat, w_flat = y.reshape(-1), z.reshape(-1), w.reshape(-1)
+        elif view_id == "Y":
+            x_flat, z_flat, w_flat = x.reshape(-1), z.reshape(-1), w.reshape(-1)
+        elif view_id == "Z":
+            x_flat, y_flat, w_flat = x.reshape(-1), y.reshape(-1), w.reshape(-1)
+        else:
+            x_flat, y_flat, z_flat = x.reshape(-1), y.reshape(-1), z.reshape(-1)
+
+        if mode.startswith("max"):
+            accumulator = np.zeros_like(grid_flat, dtype=np.float64)
+        else:
+            accumulator = np.zeros_like(grid_flat, dtype=np.float64)
+
+        rotation = self._compose_rotation_matrix()
+
+        for t_value, weight in zip(nodes, weights):
+            if axis_label == "x":
+                x_vals = np.full_like(grid_flat, t_value, dtype=np.float64)
+                points = np.stack([x_vals, y_flat, z_flat, w_flat], axis=1)
+            elif axis_label == "y":
+                y_vals = np.full_like(grid_flat, t_value, dtype=np.float64)
+                points = np.stack([x_flat, y_vals, z_flat, w_flat], axis=1)
+            elif axis_label == "z":
+                z_vals = np.full_like(grid_flat, t_value, dtype=np.float64)
+                points = np.stack([x_flat, y_flat, z_vals, w_flat], axis=1)
+            else:
+                w_vals = np.full_like(grid_flat, t_value, dtype=np.float64)
+                points = np.stack([x_flat, y_flat, z_flat, w_vals], axis=1)
+
+            rotated = points @ rotation.T
+            xr, yr, zr, wr = rotated[:, 0], rotated[:, 1], rotated[:, 2], rotated[:, 3]
+            r = np.sqrt(xr**2 + yr**2 + zr**2 + wr**2)
+            psi = np.exp(-r) * (xr**2 - yr**2 + 0.35 * zr - 0.25 * wr)
+
+            if mode.startswith("integral ψ"):
+                accumulator += psi * weight
+            elif mode.startswith("integral |ψ|"):
+                accumulator += np.abs(psi) * weight
+            else:
+                accumulator = np.maximum(accumulator, np.abs(psi))
+
+        return accumulator.reshape(grid_a.shape)
 
     def _compose_rotation_matrix(self) -> np.ndarray:
         angles = self.state.angles
