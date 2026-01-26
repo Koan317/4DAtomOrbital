@@ -71,6 +71,7 @@ class ProjectionViewWidget(QtWidgets.QWidget):
         super().__init__()
         self._extent = extent
         self._mesh_actors: dict[str, pv.Actor] = {}
+        self._camera_initialized = False
 
         layout = QtWidgets.QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -96,18 +97,23 @@ class ProjectionViewWidget(QtWidgets.QWidget):
 
         self.plotter.clear()
         self._mesh_actors.clear()
+        has_mesh = False
 
         if positive_mesh is not None:
             actor = self._add_mesh(positive_mesh, color="#4fc3f7", opacity=opacity)
             if actor is not None:
                 self._mesh_actors["positive"] = actor
+                has_mesh = True
 
         if negative_mesh is not None:
             actor = self._add_mesh(negative_mesh, color="#f06292", opacity=opacity)
             if actor is not None:
                 self._mesh_actors["negative"] = actor
+                has_mesh = True
 
-        self.plotter.reset_camera()
+        if has_mesh and not self._camera_initialized:
+            self.plotter.reset_camera()
+            self._camera_initialized = True
         self.plotter.render()
 
     def _add_mesh(
