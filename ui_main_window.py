@@ -840,6 +840,9 @@ class MainWindow(QtWidgets.QMainWindow):
 
         if self._cancel_event is not None:
             self._cancel_event.set()
+        if self._render_thread is not None and self._render_thread.isRunning():
+            self._render_thread.quit()
+            self._render_thread.wait(250)
 
         self._render_request_id += 1
         request_id = self._render_request_id
