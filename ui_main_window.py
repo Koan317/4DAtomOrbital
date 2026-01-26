@@ -3,6 +3,7 @@ import threading
 from collections import OrderedDict
 import numpy as np
 from PySide6 import QtCore, QtGui, QtWidgets
+from shiboken6 import isValid
 from skimage import measure
 
 from app_state import AppState
@@ -840,7 +841,11 @@ class MainWindow(QtWidgets.QMainWindow):
 
         if self._cancel_event is not None:
             self._cancel_event.set()
-        if self._render_thread is not None and self._render_thread.isRunning():
+        if (
+            self._render_thread is not None
+            and isValid(self._render_thread)
+            and self._render_thread.isRunning()
+        ):
             self._render_thread.quit()
             self._render_thread.wait(250)
 
@@ -885,6 +890,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._render_worker.finished.connect(self._render_thread.quit)
         self._render_worker.finished.connect(self._render_worker.deleteLater)
         self._render_thread.finished.connect(self._render_thread.deleteLater)
+        self._render_thread.finished.connect(self._on_render_thread_finished)
         self._render_thread.start()
 
     def _append_log(self, message: str) -> None:
@@ -941,6 +947,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self.status_bar.showMessage(
             f"Mode={self.state.projection_mode} | Quality=Idle"
         )
+
+    def _on_render_thread_finished(self) -> None:
+        self._render_thread = None
+        self._render_worker = None
 
     def _apply_opacity_only(self) -> None:
         opacity = self.state.opacity_percent / 100.0
