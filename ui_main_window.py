@@ -177,11 +177,12 @@ def _extract_mesh(
     vol: np.ndarray,
     level: float,
     extent: float,
-    bound: float,
 ) -> tuple[np.ndarray, np.ndarray] | None:
-    if level <= 0:
+    if level == 0 or vol.size == 0:
         return None
-    if (level > 0 and level > bound) or (level < 0 and level < bound):
+    vol_min = float(np.min(vol))
+    vol_max = float(np.max(vol))
+    if not (vol_min <= level <= vol_max):
         return None
     spacing = (2 * extent) / max(vol.shape[0] - 1, 1)
     origin = np.array([-extent, -extent, -extent], dtype=float)
@@ -301,11 +302,11 @@ class RenderWorker(QtCore.QObject):
                     mesh_neg = cached_neg
 
                 if mesh_pos is None:
-                    mesh_pos = _extract_mesh(vol, iso_value, extent, max_abs)
+                    mesh_pos = _extract_mesh(vol, iso_value, extent)
                     with self._cache_lock:
                         self._mesh_cache.set(pos_key, mesh_pos)
                 if mesh_neg is None:
-                    mesh_neg = _extract_mesh(vol, -iso_value, extent, -max_abs)
+                    mesh_neg = _extract_mesh(vol, -iso_value, extent)
                     with self._cache_lock:
                         self._mesh_cache.set(neg_key, mesh_neg)
 
@@ -698,6 +699,11 @@ class MainWindow(QtWidgets.QMainWindow):
     def closeEvent(self, event: QtGui.QCloseEvent) -> None:
         if self._render_timer.isActive():
             self._render_timer.stop()
+        if self._cancel_event is not None:
+            self._cancel_event.set()
+        if self._render_thread is not None and self._render_thread.isRunning():
+            self._render_thread.quit()
+            self._render_thread.wait(1000)
         for view in self.projection_views.values():
             view.plotter.close()
         super().closeEvent(event)
