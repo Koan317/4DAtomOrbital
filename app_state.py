@@ -3,7 +3,10 @@ from dataclasses import dataclass, field
 
 @dataclass
 class AppState:
-    orbital_name: str = "4D 1s（球对称）"
+    orbital_name: str = "1s(k=0)"
+    auto_extent: bool = True
+    extent_base: float = 6.0
+    extent_effective: float = 10.0
     angles: dict = field(
         default_factory=lambda: {
             "xy": 0,
@@ -15,7 +18,6 @@ class AppState:
         }
     )
     projection_mode: str = "切片（快速）"
-    iso_percent: int = 0
     resolution: int = 64
     integral_samples: int = 32
     live_update: bool = True
@@ -38,7 +40,8 @@ class AppState:
     def log_line(self) -> str:
         return (
             f"轨道={self.orbital_name}, 角度=[{self.angle_summary()}], "
-            f"模式={self.projection_mode}, 等值={self.iso_percent}%, "
-            f"分辨率={self.resolution}, "
-            f"采样={self.integral_samples}, 自动精细化={self.auto_refine}"
+            f"模式={self.projection_mode}, iso_fixed=3.0%, "
+            f"范围={self.extent_effective:.1f}, 分辨率={self.resolution}, "
+            f"采样={self.integral_samples}, 自动精细化={self.auto_refine}, "
+            f"自动范围={self.auto_extent}"
         )

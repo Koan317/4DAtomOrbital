@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import math
 from typing import Callable
 
 import numpy as np
@@ -10,6 +11,9 @@ import numpy as np
 class Orbital:
     orbital_id: str
     display_name: str
+    n: int = 1
+    l: int = 0
+    description: str = ""
     parameters: dict = field(default_factory=dict)
     _evaluator: Callable[[np.ndarray, np.ndarray, np.ndarray, np.ndarray], np.ndarray] = (
         lambda x, y, z, w: np.zeros_like(x)
@@ -24,37 +28,15 @@ class Orbital:
     ) -> np.ndarray:
         return self._evaluator(x, y, z, w)
 
-
-def hyperspherical_coords(
-    x: np.ndarray,
-    y: np.ndarray,
-    z: np.ndarray,
-    w: np.ndarray,
-    eps: float = 1e-12,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-    """Convert Cartesian (x,y,z,w) to 4D hyperspherical (r, chi, theta, phi).
-
-    Parameterization on S^3:
-        x = r * sin(chi) * sin(theta) * cos(phi)
-        y = r * sin(chi) * sin(theta) * sin(phi)
-        z = r * sin(chi) * cos(theta)
-        w = r * cos(chi)
-    Ranges: chi ∈ [0, π], theta ∈ [0, π], phi ∈ [0, 2π).
-    """
-    r = np.sqrt(x**2 + y**2 + z**2 + w**2)
-    rho = np.sqrt(x**2 + y**2 + z**2)
-
-    chi = np.arctan2(rho, w)
-    theta = np.arctan2(np.sqrt(x**2 + y**2), z)
-    phi = np.mod(np.arctan2(y, x), 2 * np.pi)
-
-    if np.any(r < eps):
-        mask = r < eps
-        chi = np.where(mask, 0.0, chi)
-        theta = np.where(mask, 0.0, theta)
-        phi = np.where(mask, 0.0, phi)
-
-    return r, chi, theta, phi
+    def recommended_extent(self, iso_percent: float, margin: float = 0.2) -> float:
+        """Estimate extent from iso percentage with safety margin."""
+        p = max(float(iso_percent) / 100.0, 1e-9)
+        alpha = float(self.parameters.get("alpha", 1.0))
+        n_val = max(float(self.n), 1.0)
+        r_iso = (n_val / alpha) * math.log(1.0 / p)
+        extent = (1.0 + margin) * r_iso
+        extent = math.ceil(extent / 1.0) * 1.0
+        return max(extent, 6.0)
 
 
 def _radial_envelope(r: np.ndarray, n: int, alpha: float = 1.0) -> np.ndarray:
@@ -63,50 +45,59 @@ def _radial_envelope(r: np.ndarray, n: int, alpha: float = 1.0) -> np.ndarray:
     return np.exp(-(alpha / scale) * r)
 
 
-def _angular_1s(
-    chi: np.ndarray, theta: np.ndarray, phi: np.ndarray
-) -> np.ndarray:
-    return np.ones_like(chi)
+def _transverse_terms(k: int) -> list[tuple[float, int, int]]:
+    """Build terms for T_k(x,y) = Re((x + i y)^k)."""
+    terms: list[tuple[float, int, int]] = []
+    for j in range(k // 2 + 1):
+        m = 2 * j
+        coeff = float(math.comb(k, m)) * (-1.0 if j % 2 else 1.0)
+        terms.append((coeff, k - m, m))
+    return terms
 
 
-def _angular_p_real(chi: np.ndarray, theta: np.ndarray, phi: np.ndarray) -> np.ndarray:
-    """Real p-like harmonic using (x + w)/r for smoother slice coverage."""
-    x_over_r = np.sin(chi) * np.sin(theta) * np.cos(phi)
-    w_over_r = np.cos(chi)
-    return (x_over_r + w_over_r) / np.sqrt(2.0)
+def _make_family_orbital(l: int, k: int, alpha: float = 1.0, eps: float = 1e-12) -> Orbital:
+    n = l + 1
+    letter_map = ["s", "p", "d", "f", "g", "h", "i"]
+    display_name = f"{n}{letter_map[l]}(k={k})"
+    description = (
+        "4D 分族：以 w 为极轴；k={k}；角向核 ∝ w^{l_minus_k}·Re((x+i y)^{k})/r^{l}"
+    ).format(k=k, l_minus_k=l - k, l=l)
+    terms = _transverse_terms(k)
 
-
-def _angular_d_real(chi: np.ndarray, theta: np.ndarray, phi: np.ndarray) -> np.ndarray:
-    """Real d-like harmonic using (x^2 - y^2)/r^2 = sin^2(chi) sin^2(theta) cos(2phi)."""
-    return (np.sin(chi) ** 2) * (np.sin(theta) ** 2) * np.cos(2.0 * phi)
-
-
-def _make_orbital(
-    orbital_id: str,
-    display_name: str,
-    n: int,
-    angular_fn: Callable[[np.ndarray, np.ndarray, np.ndarray], np.ndarray],
-    alpha: float = 1.0,
-) -> Orbital:
     def evaluator(x: np.ndarray, y: np.ndarray, z: np.ndarray, w: np.ndarray) -> np.ndarray:
-        r, chi, theta, phi = hyperspherical_coords(x, y, z, w)
+        r = np.sqrt(x**2 + y**2 + z**2 + w**2 + eps)
         radial = _radial_envelope(r, n=n, alpha=alpha)
-        angular = angular_fn(chi, theta, phi)
+
+        transverse = np.zeros_like(r)
+        for coeff, pow_x, pow_y in terms:
+            transverse += coeff * (x**pow_x) * (y**pow_y)
+
+        if l == 0:
+            angular = transverse
+        else:
+            w_power = w ** (l - k) if l != k else 1.0
+            angular = (w_power * transverse) / (r**l)
+
+        # ψ_{n,l,k}(x,y,z,w) = R_n(r) * A_{l,k}(x,y,z,w)
+        # A_{l,k} = w^(l-k) * Re((x+i y)^k) / r^l
         return radial * angular
 
     return Orbital(
-        orbital_id=orbital_id,
+        orbital_id=display_name,
         display_name=display_name,
-        parameters={"n": n, "alpha": alpha},
+        n=n,
+        l=l,
+        description=description,
+        parameters={"n": n, "l": l, "k": k, "alpha": alpha, "eps": eps},
         _evaluator=evaluator,
     )
 
 
-ORBITALS: list[Orbital] = [
-    _make_orbital("4d_1s", "4D 1s（球对称）", n=1, angular_fn=_angular_1s, alpha=1.0),
-    _make_orbital("4d_p_real", "4D p（实 A）", n=2, angular_fn=_angular_p_real, alpha=1.1),
-    _make_orbital("4d_d_real", "4D d（实 A）", n=3, angular_fn=_angular_d_real, alpha=1.15),
-]
+ORBITALS: list[Orbital] = []
+for l in range(7):
+    for k in range(l + 1):
+        # ψ_{n,l,k}(x,y,z,w) = R_n(r) * (w^(l-k) * T_k(x,y)) / r^l
+        ORBITALS.append(_make_family_orbital(l, k, alpha=1.0))
 
 
 def _fake_field(x: np.ndarray, y: np.ndarray, z: np.ndarray, w: np.ndarray) -> np.ndarray:
@@ -115,8 +106,11 @@ def _fake_field(x: np.ndarray, y: np.ndarray, z: np.ndarray, w: np.ndarray) -> n
 
 
 DEMO_ORBITAL = Orbital(
-    orbital_id="demo_fake",
+    orbital_id="演示/假场 (Debug)",
     display_name="演示/假场 (Debug)",
+    n=1,
+    l=0,
+    description="演示用假场（Debug）",
     parameters={"note": "legacy demo field"},
     _evaluator=_fake_field,
 )
@@ -137,11 +131,16 @@ def get_orbital_by_display_name(name: str) -> Orbital:
 
 def run_orbital_self_check() -> list[str]:
     warnings: list[str] = []
-    coords = np.linspace(-1.0, 1.0, 3, dtype=np.float64)
-    grid = np.meshgrid(coords, coords, coords, coords, indexing="ij")
-    x, y, z, w = (axis.reshape(-1) for axis in grid)
+    rng = np.random.default_rng(42)
+    samples = rng.uniform(-1.0, 1.0, size=(32, 4)).astype(np.float64)
+    x = samples[:, 0]
+    y = samples[:, 1]
+    z = samples[:, 2]
+    w = samples[:, 3]
 
     for orbital in list_orbitals(include_demo=True):
+        if orbital.display_name == DEMO_ORBITAL.display_name:
+            continue
         try:
             psi = orbital.evaluate(x, y, z, w)
         except Exception as exc:  # noqa: BLE001 - log and continue

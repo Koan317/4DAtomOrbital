@@ -1,3 +1,6 @@
+import json
+import math
+import os
 import time
 import threading
 from collections import OrderedDict
@@ -9,8 +12,137 @@ from shiboken6 import isValid
 from skimage import measure
 
 from app_state import AppState
-from orbitals import get_orbital_by_display_name, list_orbitals, run_orbital_self_check
+from orbitals import DEMO_ORBITAL, get_orbital_by_display_name, list_orbitals, run_orbital_self_check
 from ui_widgets import ProjectionViewWidget, build_labeled_slider, build_title_label
+
+
+ISO_PERCENT_FIXED = 3.0
+STRICT_PRECHECK_SAMPLES = 8
+STRICT_CANCEL_TAU = 0.02
+
+MODE_KEY_MAP = {
+    "切片（快速）": "slice",
+    "积分 ψ（严格）": "integral_strict",
+    "积分 |ψ|（稳定）": "integral_abs",
+    "最大 |ψ|（可视化）": "max_abs",
+}
+
+EXTENT_TABLE = {
+    ("1s(k=0)", "slice"): 10.0,
+    ("1s(k=0)", "integral_strict"): 10.0,
+    ("1s(k=0)", "integral_abs"): 10.0,
+    ("1s(k=0)", "max_abs"): 10.0,
+    ("2p(k=0)", "slice"): 10.0,
+    ("2p(k=0)", "integral_strict"): 10.0,
+    ("2p(k=0)", "integral_abs"): 10.0,
+    ("2p(k=0)", "max_abs"): 10.0,
+    ("2p(k=1)", "slice"): 10.0,
+    ("2p(k=1)", "integral_strict"): 10.0,
+    ("2p(k=1)", "integral_abs"): 10.0,
+    ("2p(k=1)", "max_abs"): 10.0,
+    ("3d(k=0)", "slice"): 20.0,
+    ("3d(k=0)", "integral_strict"): 20.0,
+    ("3d(k=0)", "integral_abs"): 20.0,
+    ("3d(k=0)", "max_abs"): 20.0,
+    ("3d(k=1)", "slice"): 20.0,
+    ("3d(k=1)", "integral_strict"): 20.0,
+    ("3d(k=1)", "integral_abs"): 20.0,
+    ("3d(k=1)", "max_abs"): 20.0,
+    ("3d(k=2)", "slice"): 20.0,
+    ("3d(k=2)", "integral_strict"): 20.0,
+    ("3d(k=2)", "integral_abs"): 20.0,
+    ("3d(k=2)", "max_abs"): 20.0,
+    ("4f(k=0)", "slice"): 20.0,
+    ("4f(k=0)", "integral_strict"): 20.0,
+    ("4f(k=0)", "integral_abs"): 20.0,
+    ("4f(k=0)", "max_abs"): 20.0,
+    ("4f(k=1)", "slice"): 20.0,
+    ("4f(k=1)", "integral_strict"): 20.0,
+    ("4f(k=1)", "integral_abs"): 20.0,
+    ("4f(k=1)", "max_abs"): 20.0,
+    ("4f(k=2)", "slice"): 20.0,
+    ("4f(k=2)", "integral_strict"): 20.0,
+    ("4f(k=2)", "integral_abs"): 20.0,
+    ("4f(k=2)", "max_abs"): 20.0,
+    ("4f(k=3)", "slice"): 20.0,
+    ("4f(k=3)", "integral_strict"): 20.0,
+    ("4f(k=3)", "integral_abs"): 20.0,
+    ("4f(k=3)", "max_abs"): 20.0,
+    ("5g(k=0)", "slice"): 30.0,
+    ("5g(k=0)", "integral_strict"): 30.0,
+    ("5g(k=0)", "integral_abs"): 30.0,
+    ("5g(k=0)", "max_abs"): 30.0,
+    ("5g(k=1)", "slice"): 30.0,
+    ("5g(k=1)", "integral_strict"): 30.0,
+    ("5g(k=1)", "integral_abs"): 30.0,
+    ("5g(k=1)", "max_abs"): 30.0,
+    ("5g(k=2)", "slice"): 30.0,
+    ("5g(k=2)", "integral_strict"): 30.0,
+    ("5g(k=2)", "integral_abs"): 30.0,
+    ("5g(k=2)", "max_abs"): 30.0,
+    ("5g(k=3)", "slice"): 30.0,
+    ("5g(k=3)", "integral_strict"): 30.0,
+    ("5g(k=3)", "integral_abs"): 30.0,
+    ("5g(k=3)", "max_abs"): 30.0,
+    ("5g(k=4)", "slice"): 30.0,
+    ("5g(k=4)", "integral_strict"): 30.0,
+    ("5g(k=4)", "integral_abs"): 30.0,
+    ("5g(k=4)", "max_abs"): 30.0,
+    ("6h(k=0)", "slice"): 30.0,
+    ("6h(k=0)", "integral_strict"): 30.0,
+    ("6h(k=0)", "integral_abs"): 30.0,
+    ("6h(k=0)", "max_abs"): 30.0,
+    ("6h(k=1)", "slice"): 30.0,
+    ("6h(k=1)", "integral_strict"): 30.0,
+    ("6h(k=1)", "integral_abs"): 30.0,
+    ("6h(k=1)", "max_abs"): 30.0,
+    ("6h(k=2)", "slice"): 30.0,
+    ("6h(k=2)", "integral_strict"): 30.0,
+    ("6h(k=2)", "integral_abs"): 30.0,
+    ("6h(k=2)", "max_abs"): 30.0,
+    ("6h(k=3)", "slice"): 30.0,
+    ("6h(k=3)", "integral_strict"): 30.0,
+    ("6h(k=3)", "integral_abs"): 30.0,
+    ("6h(k=3)", "max_abs"): 30.0,
+    ("6h(k=4)", "slice"): 30.0,
+    ("6h(k=4)", "integral_strict"): 30.0,
+    ("6h(k=4)", "integral_abs"): 30.0,
+    ("6h(k=4)", "max_abs"): 30.0,
+    ("6h(k=5)", "slice"): 30.0,
+    ("6h(k=5)", "integral_strict"): 30.0,
+    ("6h(k=5)", "integral_abs"): 30.0,
+    ("6h(k=5)", "max_abs"): 30.0,
+    ("7i(k=0)", "slice"): 30.0,
+    ("7i(k=0)", "integral_strict"): 30.0,
+    ("7i(k=0)", "integral_abs"): 30.0,
+    ("7i(k=0)", "max_abs"): 30.0,
+    ("7i(k=1)", "slice"): 30.0,
+    ("7i(k=1)", "integral_strict"): 30.0,
+    ("7i(k=1)", "integral_abs"): 30.0,
+    ("7i(k=1)", "max_abs"): 30.0,
+    ("7i(k=2)", "slice"): 30.0,
+    ("7i(k=2)", "integral_strict"): 30.0,
+    ("7i(k=2)", "integral_abs"): 30.0,
+    ("7i(k=2)", "max_abs"): 30.0,
+    ("7i(k=3)", "slice"): 30.0,
+    ("7i(k=3)", "integral_strict"): 30.0,
+    ("7i(k=3)", "integral_abs"): 30.0,
+    ("7i(k=3)", "max_abs"): 30.0,
+    ("7i(k=4)", "slice"): 30.0,
+    ("7i(k=4)", "integral_strict"): 30.0,
+    ("7i(k=4)", "integral_abs"): 30.0,
+    ("7i(k=4)", "max_abs"): 30.0,
+    ("7i(k=5)", "slice"): 30.0,
+    ("7i(k=5)", "integral_strict"): 30.0,
+    ("7i(k=5)", "integral_abs"): 30.0,
+    ("7i(k=5)", "max_abs"): 30.0,
+    ("7i(k=6)", "slice"): 30.0,
+    ("7i(k=6)", "integral_strict"): 30.0,
+    ("7i(k=6)", "integral_abs"): 30.0,
+    ("7i(k=6)", "max_abs"): 30.0,
+}
+
+_EXTENT_TABLE_PATH = "extent_table.json"
 
 
 class LRUCache:
@@ -37,12 +169,35 @@ class LRUCache:
             self._data.popitem(last=False)
 
 
-_ORBITAL_INDEX = {
-    "4d_1s": 0,
-    "4d_p_real": 1,
-    "4d_d_real": 2,
-    "demo_fake": 3,
-}
+_ORBITAL_LIST = list_orbitals(include_demo=True)
+_ORBITAL_INDEX = {orb.orbital_id: idx for idx, orb in enumerate(_ORBITAL_LIST)}
+_DEMO_ORBITAL_INDEX = _ORBITAL_INDEX.get(DEMO_ORBITAL.orbital_id, -1)
+_ORBITAL_L = np.array([orb.parameters.get("l", 0) for orb in _ORBITAL_LIST], dtype=np.int64)
+_ORBITAL_K = np.array([orb.parameters.get("k", 0) for orb in _ORBITAL_LIST], dtype=np.int64)
+_ORBITAL_N = np.array([orb.parameters.get("n", 1) for orb in _ORBITAL_LIST], dtype=np.float64)
+_ORBITAL_ALPHA = np.array([orb.parameters.get("alpha", 1.0) for orb in _ORBITAL_LIST], dtype=np.float64)
+
+
+def _build_transverse_tables(max_k: int = 6) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    max_terms = max_k // 2 + 1
+    coeffs = np.zeros((max_k + 1, max_terms), dtype=np.float64)
+    pow_x = np.zeros((max_k + 1, max_terms), dtype=np.int64)
+    pow_y = np.zeros((max_k + 1, max_terms), dtype=np.int64)
+    term_count = np.zeros(max_k + 1, dtype=np.int64)
+    for k in range(max_k + 1):
+        terms = k // 2 + 1
+        term_count[k] = terms
+        for j in range(terms):
+            m = 2 * j
+            coeffs[k, j] = float(math.comb(k, m)) * (-1.0 if j % 2 else 1.0)
+            pow_x[k, j] = k - m
+            pow_y[k, j] = m
+    return coeffs, pow_x, pow_y, term_count
+
+
+_TRANSVERSE_COEFFS, _TRANSVERSE_POW_X, _TRANSVERSE_POW_Y, _TRANSVERSE_TERM_COUNT = (
+    _build_transverse_tables(6)
+)
 
 _VIEW_AXIS = {"X": 0, "Y": 1, "Z": 2, "W": 3}
 
@@ -61,7 +216,6 @@ def _integral_volume_kernel(
     total = n * n * n
     out = np.empty(total, dtype=np.float64)
     eps = 1e-12
-    sqrt2 = np.sqrt(2.0)
 
     for idx in prange(total):
         i = idx // (n * n)
@@ -138,27 +292,32 @@ def _integral_volume_kernel(
                 + w * rotation[3, 3]
             )
 
-            r = np.sqrt(xr * xr + yr * yr + zr * zr + wr * wr)
-            if orbital_index == 0:
-                angular = 1.0
-                radial = np.exp(-r)
-                psi = radial * angular
-            elif orbital_index == 1:
-                if r > eps:
-                    angular = (xr + wr) / (r * sqrt2)
-                else:
-                    angular = 0.0
-                radial = np.exp(-(1.1 / 2.0) * r)
-                psi = radial * angular
-            elif orbital_index == 2:
-                if r > eps:
-                    angular = (xr * xr - yr * yr) / (r * r)
-                else:
-                    angular = 0.0
-                radial = np.exp(-(1.15 / 3.0) * r)
-                psi = radial * angular
-            else:
+            if orbital_index == _DEMO_ORBITAL_INDEX:
+                r = np.sqrt(xr * xr + yr * yr + zr * zr + wr * wr)
                 psi = np.exp(-r) * (xr * xr - yr * yr + 0.35 * zr - 0.25 * wr)
+            else:
+                r = np.sqrt(xr * xr + yr * yr + zr * zr + wr * wr + eps)
+                l_val = _ORBITAL_L[orbital_index]
+                k_val = _ORBITAL_K[orbital_index]
+                n_val = _ORBITAL_N[orbital_index]
+                alpha_val = _ORBITAL_ALPHA[orbital_index]
+
+                transverse = 0.0
+                for t in range(_TRANSVERSE_TERM_COUNT[k_val]):
+                    transverse += (
+                        _TRANSVERSE_COEFFS[k_val, t]
+                        * (xr ** _TRANSVERSE_POW_X[k_val, t])
+                        * (yr ** _TRANSVERSE_POW_Y[k_val, t])
+                    )
+
+                if l_val == 0:
+                    angular = transverse
+                else:
+                    w_power = wr ** (l_val - k_val) if l_val != k_val else 1.0
+                    angular = (w_power * transverse) / (r**l_val)
+
+                radial = np.exp(-(alpha_val / n_val) * r)
+                psi = radial * angular
 
             if mode_flag == 0:
                 acc += psi * weights[m]
@@ -379,6 +538,178 @@ def _extract_mesh(
     return (verts, faces), ""
 
 
+def _cancellation_metrics(vol: np.ndarray, tau: float = STRICT_CANCEL_TAU) -> dict:
+    if vol.size == 0:
+        return {"mean_abs": 0.0, "max_abs": 0.0, "frac_small": 1.0}
+    abs_vol = np.abs(vol)
+    max_abs = float(np.max(abs_vol))
+    mean_abs = float(np.mean(abs_vol))
+    frac_small = float(np.mean(abs_vol < (tau * max_abs))) if max_abs > 0 else 1.0
+    return {"mean_abs": mean_abs, "max_abs": max_abs, "frac_small": frac_small}
+
+
+def _is_cancellation_dominated(metrics: dict) -> bool:
+    max_abs = metrics["max_abs"]
+    mean_abs = metrics["mean_abs"]
+    frac_small = metrics["frac_small"]
+    if max_abs <= 0:
+        return True
+    return frac_small > 0.98 or mean_abs < 0.01 * max_abs
+
+
+def _precheck_strict_integral(
+    view_id: str,
+    resolution: int,
+    extent: float,
+    rotation: np.ndarray,
+    orbital_id: str,
+) -> tuple[np.ndarray, dict]:
+    coords = np.linspace(-extent, extent, resolution, dtype=np.float64)
+    nodes, weights = np.polynomial.legendre.leggauss(STRICT_PRECHECK_SAMPLES)
+    nodes = nodes * extent
+    weights = weights * extent
+    view_axis = _VIEW_AXIS[view_id]
+    orbital_index = _ORBITAL_INDEX.get(orbital_id, 0)
+    vol_pre = _integral_volume_kernel(
+        view_axis,
+        coords,
+        nodes,
+        weights,
+        rotation,
+        orbital_index,
+        0,
+    )
+    metrics = _cancellation_metrics(vol_pre)
+    return vol_pre, metrics
+
+
+def _mode_key_from_label(mode_label: str) -> str:
+    return MODE_KEY_MAP.get(mode_label, "slice")
+
+
+def _boundary_max_abs(vol: np.ndarray) -> float:
+    if vol.size == 0:
+        return 0.0
+    abs_vol = np.abs(vol)
+    return float(
+        max(
+            abs_vol[0, :, :].max(),
+            abs_vol[-1, :, :].max(),
+            abs_vol[:, 0, :].max(),
+            abs_vol[:, -1, :].max(),
+            abs_vol[:, :, 0].max(),
+            abs_vol[:, :, -1].max(),
+        )
+    )
+
+
+def _load_extent_table() -> tuple[dict[tuple[str, str], float] | None, str]:
+    if not os.path.exists(_EXTENT_TABLE_PATH):
+        return None, "missing"
+    try:
+        with open(_EXTENT_TABLE_PATH, "r", encoding="utf-8") as handle:
+            payload = json.load(handle)
+    except (OSError, json.JSONDecodeError):
+        return None, "invalid"
+    if payload.get("iso_percent_fixed") != ISO_PERCENT_FIXED:
+        return None, "iso_mismatch"
+    entries = payload.get("entries", {})
+    table: dict[tuple[str, str], float] = {}
+    for key, value in entries.items():
+        if not isinstance(key, str) or "|" not in key:
+            continue
+        orbital_id, mode_key = key.split("|", 1)
+        try:
+            table[(orbital_id, mode_key)] = float(value)
+        except (TypeError, ValueError):
+            continue
+    return table, "ok"
+
+
+def _persist_extent_table(table: dict[tuple[str, str], float]) -> None:
+    entries = {f"{orbital_id}|{mode_key}": value for (orbital_id, mode_key), value in table.items()}
+    payload = {
+        "version": 1,
+        "iso_percent_fixed": ISO_PERCENT_FIXED,
+        "entries": entries,
+    }
+    tmp_path = f"{_EXTENT_TABLE_PATH}.tmp"
+    with open(tmp_path, "w", encoding="utf-8") as handle:
+        json.dump(payload, handle, ensure_ascii=False, indent=2)
+    os.replace(tmp_path, _EXTENT_TABLE_PATH)
+
+
+def calibrate_extents(
+    rotations: int = 32,
+    seed: int = 42,
+    n_pre: int = 32,
+    m_pre: int = 10,
+    max_iter: int = 6,
+    base_extent: float = 6.0,
+) -> dict[tuple[str, str], float]:
+    rng = np.random.default_rng(seed)
+    orbitals = [orb for orb in list_orbitals(include_demo=True) if orb.display_name != DEMO_ORBITAL.display_name]
+    mode_keys = list(MODE_KEY_MAP.values())
+    angles_list = [
+        {
+            "xy": float(rng.uniform(0, 360)),
+            "xz": float(rng.uniform(0, 360)),
+            "xw": float(rng.uniform(0, 360)),
+            "yz": float(rng.uniform(0, 360)),
+            "yw": float(rng.uniform(0, 360)),
+            "zw": float(rng.uniform(0, 360)),
+        }
+        for _ in range(rotations)
+    ]
+
+    table: dict[tuple[str, str], float] = {}
+    coords = np.linspace(-base_extent, base_extent, n_pre, dtype=np.float64)
+    nodes, weights = np.polynomial.legendre.leggauss(m_pre)
+    nodes = nodes * base_extent
+    weights = weights * base_extent
+
+    for orb in orbitals:
+        for mode_key in mode_keys:
+            required = base_extent
+            for angles in angles_list:
+                rotation = _compose_rotation_matrix_from_angles(angles)
+                extent = base_extent
+                for _ in range(max_iter):
+                    if mode_key == "slice":
+                        vols = [
+                            _generate_slice_volume(view_id, n_pre, extent, rotation, orb.display_name)
+                            for view_id in ["X", "Y", "Z", "W"]
+                        ]
+                    else:
+                        mode_flag = 0 if mode_key == "integral_strict" else 1 if mode_key == "integral_abs" else 2
+                        vols = [
+                            _integral_volume_kernel(
+                                _VIEW_AXIS[view_id],
+                                np.linspace(-extent, extent, n_pre, dtype=np.float64),
+                                nodes * (extent / base_extent),
+                                weights * (extent / base_extent),
+                                rotation,
+                                _ORBITAL_INDEX[orb.orbital_id],
+                                mode_flag,
+                            )
+                            for view_id in ["X", "Y", "Z", "W"]
+                        ]
+
+                    max_abs = max(float(np.max(np.abs(vol))) for vol in vols) if vols else 0.0
+                    if max_abs == 0.0:
+                        break
+                    iso_value = (ISO_PERCENT_FIXED / 100.0) * max_abs
+                    shell_max = max(_boundary_max_abs(vol) for vol in vols)
+                    if shell_max >= iso_value:
+                        extent *= 1.25
+                        continue
+                    break
+                required = max(required, extent)
+            final = math.ceil((1.2 * required) / 10.0) * 10.0
+            table[(orb.orbital_id, mode_key)] = float(final)
+    return table
+
+
 class RenderWorker(QtCore.QObject):
     view_ready = QtCore.Signal(int, str, object, object, dict)
     log_line = QtCore.Signal(str)
@@ -407,7 +738,7 @@ class RenderWorker(QtCore.QObject):
         quality_label = self._params["quality_label"]
         resolution = self._params["resolution"]
         samples = self._params["samples"]
-        iso_percent = self._params["iso_percent"]
+        iso_percent = ISO_PERCENT_FIXED
         extent = self._params["extent"]
         orbital_id = self._params["orbital_id"]
         allow_mesh = self._params.get("allow_mesh", True)
@@ -436,6 +767,18 @@ class RenderWorker(QtCore.QObject):
             max_abs = max(abs(vol_min), abs(vol_max)) if vol.size else 0.0
             iso_value = (iso_percent / 100.0) * max_abs if iso_percent > 0 else 0.0
             is_non_negative_mode = mode.startswith("积分 |ψ|") or mode.startswith("最大 |ψ|")
+            strict_mode = mode.startswith("积分 ψ")
+            precheck_metrics = precheck_metrics_map.get(view_id)
+            if strict_mode and precheck_metrics is not None:
+                cancellation_metrics = precheck_metrics
+                cancellation_dominated = True
+                strict_cancelled = True
+            else:
+                cancellation_metrics = _cancellation_metrics(vol) if strict_mode else None
+                cancellation_dominated = (
+                    _is_cancellation_dominated(cancellation_metrics) if cancellation_metrics else False
+                )
+            strict_cancelled = strict_mode and cancellation_dominated
 
             mesh_hit_pos = False
             mesh_hit_neg = False
@@ -454,7 +797,7 @@ class RenderWorker(QtCore.QObject):
                 view_id,
             )
 
-            if iso_value > 0 and vol.size:
+            if iso_value > 0 and vol.size and not strict_cancelled:
                 pos_key = _mesh_cache_key(volume_key, iso_value, 1)
                 neg_key = _mesh_cache_key(volume_key, iso_value, -1)
                 with self._cache_lock:
@@ -480,6 +823,17 @@ class RenderWorker(QtCore.QObject):
                             self._mesh_cache.set(neg_key, mesh_neg)
                     else:
                         mesh_neg_reason = "throttled"
+            elif strict_cancelled:
+                mesh_pos_reason = "strict-cancel"
+                mesh_neg_reason = "strict-cancel"
+
+            clipped = False
+            shell_max = 0.0
+            if quality_label == "最终" and not strict_cancelled:
+                if max_abs > 0:
+                    shell_max = _boundary_max_abs(vol)
+                    if shell_max >= iso_value:
+                        clipped = True
 
             view_time_ms = int((time.perf_counter() - view_start) * 1000)
             info = {
@@ -498,8 +852,14 @@ class RenderWorker(QtCore.QObject):
                 "max_abs": max_abs,
                 "mesh_pos_reason": mesh_pos_reason,
                 "mesh_neg_reason": mesh_neg_reason,
+                "strict_cancelled": strict_cancelled,
+                "cancellation_metrics": cancellation_metrics,
+                "clipped": clipped,
+                "shell_max": shell_max,
             }
             self.view_ready.emit(self._request_id, view_id, mesh_pos, mesh_neg, info)
+
+        precheck_metrics_map: dict[str, dict] = {}
 
         if mode.startswith("切片"):
             for view_id in view_ids:
@@ -551,6 +911,30 @@ class RenderWorker(QtCore.QObject):
                     if volume_hit:
                         handle_volume(view_id, cached_vol, True)
                         continue
+                    if mode.startswith("积分 ψ"):
+                        vol_pre, metrics = _precheck_strict_integral(
+                            view_id,
+                            resolution,
+                            extent,
+                            rotation,
+                            orbital_id,
+                        )
+                        if _is_cancellation_dominated(metrics):
+                            precheck_metrics_map[view_id] = metrics
+                            self.log_line.emit(
+                                "View {view}: strict cancellation -> empty (precheck mean_abs={mean:.3e}, "
+                                "max_abs={max:.3e}, frac_small={frac:.3f})".format(
+                                    view=view_id,
+                                    mean=metrics["mean_abs"],
+                                    max=metrics["max_abs"],
+                                    frac=metrics["frac_small"],
+                                )
+                            )
+                            empty_vol = np.array([])
+                            with self._cache_lock:
+                                self._volume_cache.set(volume_key, empty_vol)
+                            handle_volume(view_id, empty_vol, False)
+                            continue
                     future = executor.submit(
                         _compute_integral_volume_task,
                         view_id,
@@ -662,17 +1046,16 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self.state = AppState()
         self._ready = False
-        self._extent = 20.0
+        self._dx_target = 0.25
+        self._allowed_resolutions = [64, 96, 128, 160]
+        self._extent = 10.0
+        self.state.extent_effective = self._extent
         self._last_mesh_time = 0.0
         self._mesh_throttle_s = 0.3
         self._render_timer = QtCore.QTimer(self)
         self._render_timer.setSingleShot(True)
         self._render_timer.timeout.connect(self._trigger_scheduled_render)
         self._pending_quality_label = "预览"
-        self._iso_timer = QtCore.QTimer(self)
-        self._iso_timer.setSingleShot(True)
-        self._iso_timer.timeout.connect(lambda: self._update_mesh_only("预览"))
-
         self._volume_cache = LRUCache(max_items=16)
         self._mesh_cache = LRUCache(max_items=32)
         self._cache_lock = threading.Lock()
@@ -685,9 +1068,12 @@ class MainWindow(QtWidgets.QMainWindow):
         self._retired_threads: list[tuple[QtCore.QThread, RenderWorker, threading.Event]] = []
         self._last_params: dict | None = None
         self._pending_render_request: tuple[str, str] | None = None
+        self._extent_retry_request_id: int | None = None
+        self._extent_retry_attempted = False
 
         self._build_status_bar()
         self._build_central()
+        self._load_extent_table()
 
         self._run_orbital_self_check()
         self._ready = True
@@ -700,6 +1086,18 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         for warning in warnings:
             self.log_panel.appendPlainText(f"轨道自检警告：{warning}")
+
+    def _load_extent_table(self) -> None:
+        loaded, status = _load_extent_table()
+        if loaded is None:
+            if status == "iso_mismatch":
+                self.log_panel.appendPlainText("范围表：iso_percent 不匹配，忽略 extent_table.json")
+            else:
+                self.log_panel.appendPlainText("范围表：未找到或无效，使用内置表")
+            return
+        EXTENT_TABLE.clear()
+        EXTENT_TABLE.update(loaded)
+        self.log_panel.appendPlainText("范围表：已从 extent_table.json 载入")
 
     def _build_status_bar(self) -> None:
         self.status_bar = QtWidgets.QStatusBar()
@@ -740,7 +1138,11 @@ class MainWindow(QtWidgets.QMainWindow):
         layout.addWidget(build_title_label("轨道"))
 
         self.orbital_list = QtWidgets.QListWidget()
-        self.orbital_list.addItems([orb.display_name for orb in list_orbitals()])
+        for orb in list_orbitals():
+            item = QtWidgets.QListWidgetItem(orb.display_name)
+            if orb.description:
+                item.setToolTip(orb.description)
+            self.orbital_list.addItem(item)
         self.orbital_list.setCurrentRow(0)
         self.orbital_list.currentTextChanged.connect(self._on_orbital_changed)
         layout.addWidget(self.orbital_list, 1)
@@ -818,15 +1220,9 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         self.projection_mode.currentTextChanged.connect(self.on_ui_changed)
 
-        self.isosurface_slider = QtWidgets.QSlider(QtCore.Qt.Orientation.Horizontal)
-        self.isosurface_slider.setRange(0, 100)
-        self.isosurface_slider.setValue(0)
-        self.isosurface_value = QtWidgets.QLabel("0%")
-        self.isosurface_slider.valueChanged.connect(self._on_isosurface_changed)
-        self.isosurface_slider.sliderReleased.connect(self._on_isosurface_released)
 
         self.resolution_combo = QtWidgets.QComboBox()
-        self.resolution_combo.addItems(["64", "96", "128"])
+        self.resolution_combo.addItems([str(val) for val in self._allowed_resolutions])
         self.resolution_combo.currentTextChanged.connect(self.on_ui_changed)
 
         self.samples_combo = QtWidgets.QComboBox()
@@ -868,9 +1264,8 @@ class MainWindow(QtWidgets.QMainWindow):
         iso_layout = QtWidgets.QHBoxLayout()
         iso_layout.addWidget(QtWidgets.QLabel("等值面级别"))
         iso_layout.addStretch(1)
-        iso_layout.addWidget(self.isosurface_value)
+        iso_layout.addWidget(QtWidgets.QLabel(f"固定 {ISO_PERCENT_FIXED}%"))
         layout.addLayout(iso_layout)
-        layout.addWidget(self.isosurface_slider)
 
         layout.addWidget(QtWidgets.QLabel("分辨率"))
         layout.addWidget(self.resolution_combo)
@@ -906,14 +1301,6 @@ class MainWindow(QtWidgets.QMainWindow):
         self.state.orbital_name = text
         self.on_ui_changed()
 
-    def _on_isosurface_changed(self, value: int) -> None:
-        self.isosurface_value.setText(f"{value}%")
-        self.state.iso_percent = value
-        self._handle_value_change("iso")
-
-    def _on_isosurface_released(self) -> None:
-        self._handle_slider_released("iso")
-
     def _reset_angles(self) -> None:
         for name, widgets in self.angle_controls.items():
             widgets["slider"].blockSignals(True)
@@ -926,8 +1313,6 @@ class MainWindow(QtWidgets.QMainWindow):
     def closeEvent(self, event: QtGui.QCloseEvent) -> None:
         if self._render_timer.isActive():
             self._render_timer.stop()
-        if self._iso_timer.isActive():
-            self._iso_timer.stop()
         if self._cancel_event is not None:
             self._cancel_event.set()
         if (
@@ -953,19 +1338,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.state.auto_refine = self.auto_refine.isChecked()
         self.state.preview_quality = self.preview_quality_combo.currentText()
         self.state.final_quality = self.final_quality_combo.currentText()
-
         if self.orbital_list.currentItem() is not None:
             self.state.orbital_name = self.orbital_list.currentItem().text()
-
-        if (
-            not self.state.projection_mode.startswith("切片")
-            and self.state.iso_percent == 0
-        ):
-            self.isosurface_slider.blockSignals(True)
-            self.isosurface_slider.setValue(15)
-            self.isosurface_slider.blockSignals(False)
-            self.isosurface_value.setText("15%")
-            self.state.iso_percent = 15
 
         self.status_bar.showMessage(f"模式={self.state.projection_mode} | 质量=空闲")
         self.log_panel.appendPlainText(self.state.log_line())
@@ -994,14 +1368,13 @@ class MainWindow(QtWidgets.QMainWindow):
             "angles",
             "resolution",
             "integral_samples",
+            "extent",
             "preview_quality",
             "final_quality",
             "auto_refine",
         ]
         if changed(volume_keys):
             return "volume"
-        if previous["iso_percent"] != current["iso_percent"]:
-            return "iso"
         return "none"
 
     def _current_params(self) -> dict:
@@ -1011,7 +1384,7 @@ class MainWindow(QtWidgets.QMainWindow):
             "angles": dict(self.state.angles),
             "resolution": self.state.resolution,
             "integral_samples": self.state.integral_samples,
-            "iso_percent": self.state.iso_percent,
+            "extent": self.state.extent_effective,
             "preview_quality": self.state.preview_quality,
             "final_quality": self.state.final_quality,
             "auto_refine": self.state.auto_refine,
@@ -1020,9 +1393,6 @@ class MainWindow(QtWidgets.QMainWindow):
     def _handle_value_change(self, change_kind: str) -> None:
         self.on_ui_changed(schedule_render=False)
         if not self.state.live_update:
-            return
-        if change_kind == "iso":
-            self._schedule_iso_mesh_update()
             return
         self._schedule_render(self._resolve_quality_label(final=False))
 
@@ -1061,56 +1431,8 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         self._render_timer.start(60)
 
-    def _schedule_iso_mesh_update(self) -> None:
-        if self._iso_timer.isActive():
-            self._iso_timer.stop()
-        self._iso_timer.start(60)
-
     def _trigger_scheduled_render(self) -> None:
         self._start_render(self._pending_quality_label, "scheduled")
-
-    def _update_mesh_only(self, quality_label: str) -> None:
-        if not self.isVisible():
-            return
-        resolution, samples = self._quality_to_settings(quality_label)
-        mode = self.state.projection_mode
-        angles = dict(self.state.angles)
-        extent = self._extent
-        iso_percent = self.state.iso_percent
-        orbital_id = get_orbital_by_display_name(self.state.orbital_name).orbital_id
-
-        volume_hits: dict[str, np.ndarray] = {}
-        for view_id in ["X", "Y", "Z", "W"]:
-            volume_key = _volume_cache_key(
-                orbital_id,
-                mode,
-                angles,
-                resolution,
-                samples,
-                extent,
-                view_id,
-            )
-            with self._cache_lock:
-                hit, cached_vol = self._volume_cache.get_with_hit(volume_key)
-            if not hit:
-                self._start_render(quality_label, "iso-mesh-miss")
-                return
-            volume_hits[view_id] = cached_vol
-
-        for view_id, vol in volume_hits.items():
-            max_abs = float(np.max(np.abs(vol))) if vol.size else 0.0
-            iso_value = (iso_percent / 100.0) * max_abs if iso_percent > 0 else 0.0
-            if iso_value > 0:
-                mesh_pos, _ = _extract_mesh(vol, iso_value, extent)
-                if mode.startswith("积分 |ψ|") or mode.startswith("最大 |ψ|"):
-                    mesh_neg = None
-                else:
-                    mesh_neg, _ = _extract_mesh(vol, -iso_value, extent)
-            else:
-                mesh_pos = None
-                mesh_neg = None
-            self.projection_views[view_id].set_meshes(mesh_pos, mesh_neg, 1.0)
-        self.log_panel.appendPlainText("等值面仅网格更新（预览）")
 
     def _start_render(self, quality_label: str, reason: str) -> None:
         if not self.isVisible():
@@ -1136,9 +1458,18 @@ class MainWindow(QtWidgets.QMainWindow):
         self._render_request_id += 1
         request_id = self._render_request_id
         self._active_request_id = request_id
+        self._extent_retry_request_id = request_id
+        self._extent_retry_attempted = reason == "extent-retry"
         self._cancel_event = threading.Event()
+        self._clear_views()
 
         orbital = get_orbital_by_display_name(self.state.orbital_name)
+        mode_key = _mode_key_from_label(self.state.projection_mode)
+        extent = EXTENT_TABLE.get((orbital.orbital_id, mode_key), self.state.extent_base)
+        self._extent = extent
+        self.state.extent_effective = extent
+        for view in self.projection_views.values():
+            view.set_extent(extent)
         allow_mesh = True
         if not self.state.projection_mode.startswith("切片") and quality_label == "预览":
             now = time.perf_counter()
@@ -1156,8 +1487,7 @@ class MainWindow(QtWidgets.QMainWindow):
             "angles": dict(self.state.angles),
             "resolution": resolution,
             "samples": samples,
-            "iso_percent": self.state.iso_percent,
-            "extent": self._extent,
+            "extent": extent,
             "quality_label": quality_label,
             "allow_mesh": allow_mesh,
         }
@@ -1172,7 +1502,13 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self._update_status(params, 0, "缓存=--")
         self.log_panel.appendPlainText(
-            f"渲染#{request_id} 已排队（{quality_label}，原因={reason_text}）"
+            "渲染#{rid} 已排队（{quality}，原因={reason}，iso_fixed={iso}%，extent={extent:.1f}）".format(
+                rid=request_id,
+                quality=quality_label,
+                reason=reason_text,
+                iso=ISO_PERCENT_FIXED,
+                extent=extent,
+            )
         )
 
         self._render_thread = QtCore.QThread(self)
@@ -1218,7 +1554,35 @@ class MainWindow(QtWidgets.QMainWindow):
 
         mesh_pos_data = mesh_pos if isinstance(mesh_pos, tuple) else None
         mesh_neg_data = mesh_neg if isinstance(mesh_neg, tuple) else None
-        self.projection_views[view_id].set_meshes(mesh_pos_data, mesh_neg_data, 1.0)
+        if info.get("strict_cancelled"):
+            self.projection_views[view_id].set_meshes(None, None, 1.0)
+        else:
+            self.projection_views[view_id].set_meshes(mesh_pos_data, mesh_neg_data, 1.0)
+
+        if (
+            info.get("clipped")
+            and self._extent_retry_request_id == request_id
+            and not self._extent_retry_attempted
+        ):
+            self._extent_retry_attempted = True
+            orbital_id = get_orbital_by_display_name(self.state.orbital_name).orbital_id
+            mode_key = _mode_key_from_label(self.state.projection_mode)
+            old_extent = self._extent
+            new_extent = math.ceil((old_extent * 1.25 * 1.20) / 10.0) * 10.0
+            EXTENT_TABLE[(orbital_id, mode_key)] = float(new_extent)
+            _persist_extent_table(EXTENT_TABLE)
+            self.log_panel.appendPlainText(
+                "extent_table updated: {key}: {old:.1f} -> {new:.1f} (clipping detected; retried once)".format(
+                    key=f"{orbital_id}|{mode_key}",
+                    old=old_extent,
+                    new=new_extent,
+                )
+            )
+            self._start_render(self._resolve_quality_label(final=True), "extent-retry")
+        elif info.get("clipped") and self._extent_retry_attempted:
+            self.log_panel.appendPlainText(
+                "extent retry failed: still clipped after retry (extent={:.1f})".format(self._extent)
+            )
 
         self.log_panel.appendPlainText(
             "视图 {view} 体积：缓存 {vol}".format(
@@ -1226,7 +1590,25 @@ class MainWindow(QtWidgets.QMainWindow):
                 vol="命中" if info["volume_hit"] else "未命中",
             )
         )
-        if info["iso_value"] <= 0:
+        if info.get("strict_cancelled"):
+            metrics = info.get("cancellation_metrics") or {"mean_abs": 0.0, "max_abs": 0.0, "frac_small": 1.0}
+            self.log_panel.appendPlainText(
+                "View {view}: strict cancellation -> empty (mean_abs={mean:.3e}, "
+                "max_abs={max:.3e}, frac_small={frac:.3f})".format(
+                    view=view_id,
+                    mean=metrics["mean_abs"],
+                    max=metrics["max_abs"],
+                    frac=metrics["frac_small"],
+                )
+            )
+            self.status_bar.showMessage(
+                "模式={mode} | 质量={quality} | View {view} 严格抵消为空".format(
+                    mode=info["mode"],
+                    quality=quality_label,
+                    view=view_id,
+                )
+            )
+        elif info["iso_value"] <= 0:
             self.log_panel.appendPlainText(f"视图 {view_id} 网格：跳过（iso=0）")
         else:
             if mesh_pos_data is None:
@@ -1312,3 +1694,15 @@ class MainWindow(QtWidgets.QMainWindow):
         self.status_bar.showMessage(
             f"模式={mode} | 质量={quality_label} | 计算中... ({view_index}/4) | {cache_text}"
         )
+
+    def _current_orbital_n(self) -> int:
+        orbital = get_orbital_by_display_name(self.state.orbital_name)
+        return orbital.n
+
+    def _snap_resolution(self, target: int) -> int:
+        return min(self._allowed_resolutions, key=lambda res: abs(res - target))
+
+    def _clear_views(self) -> None:
+        for view in self.projection_views.values():
+            view.set_meshes(None, None, 1.0)
+            view.set_empty_message_visible(False)
