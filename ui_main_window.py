@@ -865,11 +865,14 @@ class MainWindow(QtWidgets.QMainWindow):
             and isValid(self._render_thread)
             and self._render_thread.isRunning()
         ):
-            self._cancel_event.set()
             self._pending_render_request = (quality_label, reason)
-            self.log_panel.appendPlainText(
-                f"渲染请求已合并（{quality_label}，原因={reason}）"
-            )
+            should_cancel = reason == "release" or quality_label == "最终"
+            if should_cancel:
+                self._cancel_event.set()
+                message = f"渲染请求已合并并取消当前计算（{quality_label}，原因={reason}）"
+            else:
+                message = f"渲染请求已合并（不取消当前计算，{quality_label}，原因={reason}）"
+            self.log_panel.appendPlainText(message)
             return
 
         self._render_request_id += 1
