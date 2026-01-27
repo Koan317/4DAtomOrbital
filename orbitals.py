@@ -13,6 +13,7 @@ class Orbital:
     display_name: str
     n: int = 1
     l: int = 0
+    k: int | None = None
     short_desc_zh: str = ""
     parameters: dict = field(default_factory=dict)
     _evaluator: Callable[[np.ndarray, np.ndarray, np.ndarray, np.ndarray], np.ndarray] = (
@@ -87,6 +88,7 @@ def _make_family_orbital(l: int, k: int, alpha: float = 1.0, eps: float = 1e-12)
         display_name=display_name,
         n=n,
         l=l,
+        k=k,
         short_desc_zh=short_desc_zh,
         parameters={"n": n, "l": l, "k": k, "alpha": alpha, "eps": eps},
         _evaluator=evaluator,
@@ -110,6 +112,7 @@ DEMO_ORBITAL = Orbital(
     display_name="演示/假场 (Debug)",
     n=1,
     l=0,
+    k=None,
     short_desc_zh="演示用假场（Debug）",
     parameters={"note": "legacy demo field"},
     _evaluator=_fake_field,
@@ -132,6 +135,7 @@ def get_orbital_manifest(include_demo: bool = True) -> list[dict]:
             "display_name": orb.display_name,
             "n": orb.n,
             "l": orb.l,
+            "k": orb.k,
             "desc": orb.short_desc_zh,
         }
         for orb in orbitals

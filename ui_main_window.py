@@ -1376,6 +1376,16 @@ class MainWindow(QtWidgets.QMainWindow):
         layout.addWidget(self.final_quality_combo)
 
         layout.addWidget(self.reset_button)
+
+        self.explanation_group = QtWidgets.QGroupBox("说明")
+        explanation_layout = QtWidgets.QVBoxLayout(self.explanation_group)
+        self.explanation_text = QtWidgets.QTextEdit()
+        self.explanation_text.setReadOnly(True)
+        self.explanation_text.setMinimumHeight(220)
+        self.explanation_text.setPlaceholderText("轨道/投影/旋转说明将在此显示。")
+        explanation_layout.addWidget(self.explanation_text)
+        layout.addWidget(self.explanation_group)
+
         self.log_panel = QtWidgets.QPlainTextEdit()
         self.log_panel.setReadOnly(True)
         self.log_panel.setPlaceholderText("界面事件日志...")
@@ -1383,8 +1393,46 @@ class MainWindow(QtWidgets.QMainWindow):
 
         return panel
 
+    def _update_explanation_panel(self) -> None:
+        if not getattr(self, "explanation_text", None):
+            return
+        orbital = get_orbital_by_id(self.state.orbital_id)
+        desc = orbital.short_desc_zh or orbital.display_name
+        k_value = orbital.k if orbital.k is not None else orbital.parameters.get("k")
+        params = f"参数：n={orbital.n}, l={orbital.l}"
+        if k_value is not None:
+            params += f", k={k_value}"
+
+        angle_text = ", ".join(
+            f"{key}={self.state.angles[key]}°"
+            for key in ["xy", "xz", "xw", "yz", "yw", "zw"]
+        )
+
+        text = "\n".join(
+            [
+                "当前轨道：",
+                f"  名称（严格ID）：{orbital.orbital_id}",
+                f"  {params}",
+                f"  一句话描述：{desc}",
+                "",
+                "当前投影模式：",
+                "  切片（快速）：在某一轴固定切片得到3D场，再抽等值面",
+                "  积分 ψ（严格）：沿被投影轴对 ψ 做有符号积分（可能发生正负抵消，部分角度可能为空）",
+                "  积分（稳定）：沿被投影轴对 |ψ| 积分（更稳定，通常更易出图）",
+                "  最大（可视化）：沿被投影轴取 max |ψ|（强调包络/峰值）",
+                "",
+                "旋转控制（6个平面旋转）：",
+                "  XY / XZ / XW / YZ / YW / ZW：分别表示在对应坐标平面内旋转",
+                "  组合效果：最终姿态是6个平面旋转叠加；调整任意一个会同步影响全部4个投影视图",
+                f"  当前角度：{angle_text}",
+                "  注意：这里显示不需要补前导0（例如 5° 而不是 005°）",
+            ]
+        )
+        self.explanation_text.setPlainText(text)
+
     def _on_angle_changed(self, name: str, value: int) -> None:
         self.state.angles[name] = value
+        self._update_explanation_panel()
         self._handle_value_change("angles")
 
     def _on_angle_released(self, name: str) -> None:
@@ -1408,6 +1456,7 @@ class MainWindow(QtWidgets.QMainWindow):
                     mode=mode_key,
                 )
             )
+        self._update_explanation_panel()
         self.on_ui_changed()
 
     def _reset_angles(self) -> None:
@@ -1452,6 +1501,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 QtCore.Qt.ItemDataRole.UserRole
             )
 
+        self._update_explanation_panel()
         self.status_bar.showMessage(f"模式={self.state.projection_mode} | 质量=空闲")
 
         change_kind = self._detect_change_kind()
