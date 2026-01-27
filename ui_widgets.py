@@ -71,6 +71,7 @@ class ProjectionViewWidget(QtWidgets.QWidget):
         super().__init__()
         self._extent = extent
         self._mesh_actors: dict[str, pv.Actor] = {}
+        self._camera_initialized = False
 
         layout = QtWidgets.QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -94,20 +95,29 @@ class ProjectionViewWidget(QtWidgets.QWidget):
         if not self.isVisible():
             return
 
-        self.plotter.clear()
+        for actor in self._mesh_actors.values():
+            try:
+                self.plotter.remove_actor(actor)
+            except (AttributeError, RuntimeError):
+                continue
         self._mesh_actors.clear()
+        has_mesh = False
 
         if positive_mesh is not None:
             actor = self._add_mesh(positive_mesh, color="#4fc3f7", opacity=opacity)
             if actor is not None:
                 self._mesh_actors["positive"] = actor
+                has_mesh = True
 
         if negative_mesh is not None:
             actor = self._add_mesh(negative_mesh, color="#f06292", opacity=opacity)
             if actor is not None:
                 self._mesh_actors["negative"] = actor
+                has_mesh = True
 
-        self.plotter.reset_camera()
+        if has_mesh and not self._camera_initialized:
+            self.plotter.reset_camera()
+            self._camera_initialized = True
         self.plotter.render()
 
     def _add_mesh(
@@ -121,7 +131,7 @@ class ProjectionViewWidget(QtWidgets.QWidget):
             return None
         faces_pv = np.hstack([np.full((faces.shape[0], 1), 3), faces]).astype(np.int64).ravel()
         mesh = pv.PolyData(verts, faces_pv)
-        return self.plotter.add_mesh(mesh, color=color, opacity=opacity, smooth_shading=True)
+        return self.plotter.add_mesh(mesh, color=color, opacity=opacity, smooth_shading=False)
 
     def set_opacity(self, opacity: float) -> None:
         if not self.isVisible():

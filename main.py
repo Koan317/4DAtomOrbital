@@ -1,3 +1,4 @@
+import faulthandler
 import sys
 
 from PySide6 import QtWidgets
@@ -6,6 +7,7 @@ from ui_main_window import MainWindow
 
 
 def main() -> None:
+    faulthandler.enable()
     app = QtWidgets.QApplication(sys.argv)
     window = MainWindow()
     window.show()

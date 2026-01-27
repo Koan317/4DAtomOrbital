@@ -416,6 +416,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self._render_timer.setSingleShot(True)
         self._render_timer.timeout.connect(self._trigger_scheduled_render)
         self._pending_quality_label = "Preview"
+        self._iso_timer = QtCore.QTimer(self)
+        self._iso_timer.setSingleShot(True)
+        self._iso_timer.timeout.connect(lambda: self._update_mesh_only("Preview"))
 
         self._volume_cache = LRUCache(max_items=16)
         self._mesh_cache = LRUCache(max_items=32)
@@ -701,6 +704,8 @@ class MainWindow(QtWidgets.QMainWindow):
     def closeEvent(self, event: QtGui.QCloseEvent) -> None:
         if self._render_timer.isActive():
             self._render_timer.stop()
+        if self._iso_timer.isActive():
+            self._iso_timer.stop()
         if self._cancel_event is not None:
             self._cancel_event.set()
         if (
@@ -796,7 +801,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 self._apply_opacity_only()
             return
         if change_kind == "iso":
-            self._schedule_render(self._resolve_quality_label(final=False))
+            self._schedule_iso_mesh_update()
             return
         self._schedule_render(self._resolve_quality_label(final=False))
 
@@ -838,8 +843,49 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         self._render_timer.start(60)
 
+    def _schedule_iso_mesh_update(self) -> None:
+        if self._iso_timer.isActive():
+            self._iso_timer.stop()
+        self._iso_timer.start(60)
+
     def _trigger_scheduled_render(self) -> None:
         self._start_render(self._pending_quality_label, "scheduled")
+
+    def _update_mesh_only(self, quality_label: str) -> None:
+        if not self.isVisible():
+            return
+        resolution, samples = self._quality_to_settings(quality_label)
+        mode = self.state.projection_mode
+        angles = dict(self.state.angles)
+        extent = self._extent
+        iso_percent = self.state.iso_percent
+
+        volume_hits: dict[str, np.ndarray] = {}
+        for view_id in ["X", "Y", "Z", "W"]:
+            volume_key = _volume_cache_key(
+                self.state.orbital_name,
+                mode,
+                angles,
+                resolution,
+                samples,
+                extent,
+                view_id,
+            )
+            with self._cache_lock:
+                hit, cached_vol = self._volume_cache.get_with_hit(volume_key)
+            if not hit:
+                self._start_render(quality_label, "iso-mesh-miss")
+                return
+            volume_hits[view_id] = cached_vol
+
+        opacity = self.state.opacity_percent / 100.0
+        for view_id, vol in volume_hits.items():
+            max_abs = float(np.max(np.abs(vol))) if vol.size else 0.0
+            iso_value = (iso_percent / 100.0) * max_abs if iso_percent > 0 else 0.0
+            mesh_pos = _extract_mesh(vol, iso_value, extent) if iso_value > 0 else None
+            mesh_neg = _extract_mesh(vol, -iso_value, extent) if iso_value > 0 else None
+            self.projection_views[view_id].set_meshes(mesh_pos, mesh_neg, opacity)
+        self.log_panel.appendPlainText("ISO mesh-only update (preview)")
 
     def _start_render(self, quality_label: str, reason: str) -> None:
         if not self.isVisible():
