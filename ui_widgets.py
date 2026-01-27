@@ -95,7 +95,11 @@ class ProjectionViewWidget(QtWidgets.QWidget):
         if not self.isVisible():
             return
 
-        self.plotter.clear()
+        for actor in self._mesh_actors.values():
+            try:
+                self.plotter.remove_actor(actor)
+            except (AttributeError, RuntimeError):
+                continue
         self._mesh_actors.clear()
         has_mesh = False
 
@@ -127,7 +131,7 @@ class ProjectionViewWidget(QtWidgets.QWidget):
             return None
         faces_pv = np.hstack([np.full((faces.shape[0], 1), 3), faces]).astype(np.int64).ravel()
         mesh = pv.PolyData(verts, faces_pv)
-        return self.plotter.add_mesh(mesh, color=color, opacity=opacity, smooth_shading=True)
+        return self.plotter.add_mesh(mesh, color=color, opacity=opacity, smooth_shading=False)
 
     def set_opacity(self, opacity: float) -> None:
         if not self.isVisible():
