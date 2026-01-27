@@ -1,4 +1,6 @@
+import json
 import math
+import os
 import time
 import threading
 from collections import OrderedDict
@@ -139,6 +141,8 @@ EXTENT_TABLE = {
     ("7i(k=6)", "integral_abs"): 30.0,
     ("7i(k=6)", "max_abs"): 30.0,
 }
+
+_EXTENT_TABLE_PATH = "extent_table.json"
 
 
 class LRUCache:
@@ -599,6 +603,42 @@ def _boundary_max_abs(vol: np.ndarray) -> float:
     )
 
 
+def _load_extent_table() -> tuple[dict[tuple[str, str], float] | None, str]:
+    if not os.path.exists(_EXTENT_TABLE_PATH):
+        return None, "missing"
+    try:
+        with open(_EXTENT_TABLE_PATH, "r", encoding="utf-8") as handle:
+            payload = json.load(handle)
+    except (OSError, json.JSONDecodeError):
+        return None, "invalid"
+    if payload.get("iso_percent_fixed") != ISO_PERCENT_FIXED:
+        return None, "iso_mismatch"
+    entries = payload.get("entries", {})
+    table: dict[tuple[str, str], float] = {}
+    for key, value in entries.items():
+        if not isinstance(key, str) or "|" not in key:
+            continue
+        orbital_id, mode_key = key.split("|", 1)
+        try:
+            table[(orbital_id, mode_key)] = float(value)
+        except (TypeError, ValueError):
+            continue
+    return table, "ok"
+
+
+def _persist_extent_table(table: dict[tuple[str, str], float]) -> None:
+    entries = {f"{orbital_id}|{mode_key}": value for (orbital_id, mode_key), value in table.items()}
+    payload = {
+        "version": 1,
+        "iso_percent_fixed": ISO_PERCENT_FIXED,
+        "entries": entries,
+    }
+    tmp_path = f"{_EXTENT_TABLE_PATH}.tmp"
+    with open(tmp_path, "w", encoding="utf-8") as handle:
+        json.dump(payload, handle, ensure_ascii=False, indent=2)
+    os.replace(tmp_path, _EXTENT_TABLE_PATH)
+
+
 def calibrate_extents(
     rotations: int = 32,
     seed: int = 42,
@@ -738,7 +778,7 @@ class RenderWorker(QtCore.QObject):
                 cancellation_dominated = (
                     _is_cancellation_dominated(cancellation_metrics) if cancellation_metrics else False
                 )
-                strict_cancelled = strict_mode and cancellation_dominated
+            strict_cancelled = strict_mode and cancellation_dominated
 
             mesh_hit_pos = False
             mesh_hit_neg = False
@@ -787,6 +827,14 @@ class RenderWorker(QtCore.QObject):
                 mesh_pos_reason = "strict-cancel"
                 mesh_neg_reason = "strict-cancel"
 
+            clipped = False
+            shell_max = 0.0
+            if quality_label == "最终" and not strict_cancelled:
+                if max_abs > 0:
+                    shell_max = _boundary_max_abs(vol)
+                    if shell_max >= iso_value:
+                        clipped = True
+
             view_time_ms = int((time.perf_counter() - view_start) * 1000)
             info = {
                 "view_index": view_index[view_id],
@@ -806,6 +854,8 @@ class RenderWorker(QtCore.QObject):
                 "mesh_neg_reason": mesh_neg_reason,
                 "strict_cancelled": strict_cancelled,
                 "cancellation_metrics": cancellation_metrics,
+                "clipped": clipped,
+                "shell_max": shell_max,
             }
             self.view_ready.emit(self._request_id, view_id, mesh_pos, mesh_neg, info)
 
@@ -996,16 +1046,10 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self.state = AppState()
         self._ready = False
-        self._extent_base = 6.0
-        self._extent_step = 2.0
-        self._extent_min = 6.0
-        self._extent_max = 20.0
         self._dx_target = 0.25
         self._allowed_resolutions = [64, 96, 128, 160]
-        base_extent = self._compute_auto_extent(self._current_orbital_n())
-        self._extent = base_extent
-        self.state.extent_base = base_extent
-        self.state.extent_effective = base_extent
+        self._extent = 10.0
+        self.state.extent_effective = self._extent
         self._last_mesh_time = 0.0
         self._mesh_throttle_s = 0.3
         self._render_timer = QtCore.QTimer(self)
@@ -1024,9 +1068,12 @@ class MainWindow(QtWidgets.QMainWindow):
         self._retired_threads: list[tuple[QtCore.QThread, RenderWorker, threading.Event]] = []
         self._last_params: dict | None = None
         self._pending_render_request: tuple[str, str] | None = None
+        self._extent_retry_request_id: int | None = None
+        self._extent_retry_attempted = False
 
         self._build_status_bar()
         self._build_central()
+        self._load_extent_table()
 
         self._run_orbital_self_check()
         self._ready = True
@@ -1039,6 +1086,18 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         for warning in warnings:
             self.log_panel.appendPlainText(f"轨道自检警告：{warning}")
+
+    def _load_extent_table(self) -> None:
+        loaded, status = _load_extent_table()
+        if loaded is None:
+            if status == "iso_mismatch":
+                self.log_panel.appendPlainText("范围表：iso_percent 不匹配，忽略 extent_table.json")
+            else:
+                self.log_panel.appendPlainText("范围表：未找到或无效，使用内置表")
+            return
+        EXTENT_TABLE.clear()
+        EXTENT_TABLE.update(loaded)
+        self.log_panel.appendPlainText("范围表：已从 extent_table.json 载入")
 
     def _build_status_bar(self) -> None:
         self.status_bar = QtWidgets.QStatusBar()
@@ -1161,16 +1220,6 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         self.projection_mode.currentTextChanged.connect(self.on_ui_changed)
 
-        self.auto_extent = QtWidgets.QCheckBox("自动范围 (Auto Extent)")
-        self.auto_extent.setChecked(True)
-        self.auto_extent.toggled.connect(self._on_auto_extent_toggled)
-
-        self.extent_slider = QtWidgets.QSlider(QtCore.Qt.Orientation.Horizontal)
-        self.extent_slider.setRange(int(self._extent_min * 10), int(self._extent_max * 10))
-        self.extent_slider.setValue(int(self.state.extent_base * 10))
-        self.extent_slider.valueChanged.connect(self._on_extent_changed)
-        self.extent_slider.sliderReleased.connect(self._on_extent_released)
-        self.extent_value = QtWidgets.QLabel(f"{self._extent:.1f}")
 
         self.resolution_combo = QtWidgets.QComboBox()
         self.resolution_combo.addItems([str(val) for val in self._allowed_resolutions])
@@ -1212,14 +1261,6 @@ class MainWindow(QtWidgets.QMainWindow):
         layout.addWidget(QtWidgets.QLabel("投影模式"))
         layout.addWidget(self.projection_mode)
 
-        layout.addWidget(self.auto_extent)
-        extent_layout = QtWidgets.QHBoxLayout()
-        extent_layout.addWidget(QtWidgets.QLabel("范围 L"))
-        extent_layout.addStretch(1)
-        extent_layout.addWidget(self.extent_value)
-        layout.addLayout(extent_layout)
-        layout.addWidget(self.extent_slider)
-
         iso_layout = QtWidgets.QHBoxLayout()
         iso_layout.addWidget(QtWidgets.QLabel("等值面级别"))
         iso_layout.addStretch(1)
@@ -1260,20 +1301,6 @@ class MainWindow(QtWidgets.QMainWindow):
         self.state.orbital_name = text
         self.on_ui_changed()
 
-    def _on_auto_extent_toggled(self, checked: bool) -> None:
-        self.state.auto_extent = checked
-        self._refresh_extent_settings()
-        self._handle_value_change("volume")
-
-    def _on_extent_changed(self, value: int) -> None:
-        extent = value / 10.0
-        self.state.extent_base = extent
-        self._refresh_extent_settings()
-        self._handle_value_change("volume")
-
-    def _on_extent_released(self) -> None:
-        self._handle_slider_released("volume")
-
     def _reset_angles(self) -> None:
         for name, widgets in self.angle_controls.items():
             widgets["slider"].blockSignals(True)
@@ -1311,11 +1338,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.state.auto_refine = self.auto_refine.isChecked()
         self.state.preview_quality = self.preview_quality_combo.currentText()
         self.state.final_quality = self.final_quality_combo.currentText()
-        self.state.auto_extent = self.auto_extent.isChecked()
         if self.orbital_list.currentItem() is not None:
             self.state.orbital_name = self.orbital_list.currentItem().text()
-
-        self._refresh_extent_settings()
 
         self.status_bar.showMessage(f"模式={self.state.projection_mode} | 质量=空闲")
         self.log_panel.appendPlainText(self.state.log_line())
@@ -1345,7 +1369,6 @@ class MainWindow(QtWidgets.QMainWindow):
             "resolution",
             "integral_samples",
             "extent",
-            "auto_extent",
             "preview_quality",
             "final_quality",
             "auto_refine",
@@ -1362,7 +1385,6 @@ class MainWindow(QtWidgets.QMainWindow):
             "resolution": self.state.resolution,
             "integral_samples": self.state.integral_samples,
             "extent": self.state.extent_effective,
-            "auto_extent": self.state.auto_extent,
             "preview_quality": self.state.preview_quality,
             "final_quality": self.state.final_quality,
             "auto_refine": self.state.auto_refine,
@@ -1393,17 +1415,15 @@ class MainWindow(QtWidgets.QMainWindow):
                 "快速（N=64，采样=32）": (64, 32),
                 "中等（N=96，采样=64）": (96, 64),
             }
-            resolution, samples = mapping[current]
-            return self._apply_extent_resolution(resolution), samples
+            return mapping[current]
         if quality_label == "最终":
             current = self.final_quality_combo.currentText()
             mapping = {
                 "高（N=128，采样=128）": (128, 128),
                 "超高（N=160，采样=256）": (160, 256),
             }
-            resolution, samples = mapping[current]
-            return self._apply_extent_resolution(resolution), samples
-        return self._apply_extent_resolution(self.state.resolution), self.state.integral_samples
+            return mapping[current]
+        return self.state.resolution, self.state.integral_samples
 
     def _schedule_render(self, quality_label: str) -> None:
         self._pending_quality_label = quality_label
@@ -1438,6 +1458,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self._render_request_id += 1
         request_id = self._render_request_id
         self._active_request_id = request_id
+        self._extent_retry_request_id = request_id
+        self._extent_retry_attempted = reason == "extent-retry"
         self._cancel_event = threading.Event()
         self._clear_views()
 
@@ -1446,7 +1468,6 @@ class MainWindow(QtWidgets.QMainWindow):
         extent = EXTENT_TABLE.get((orbital.orbital_id, mode_key), self.state.extent_base)
         self._extent = extent
         self.state.extent_effective = extent
-        self.extent_value.setText(f"{extent:.1f}")
         for view in self.projection_views.values():
             view.set_extent(extent)
         allow_mesh = True
@@ -1537,6 +1558,31 @@ class MainWindow(QtWidgets.QMainWindow):
             self.projection_views[view_id].set_meshes(None, None, 1.0)
         else:
             self.projection_views[view_id].set_meshes(mesh_pos_data, mesh_neg_data, 1.0)
+
+        if (
+            info.get("clipped")
+            and self._extent_retry_request_id == request_id
+            and not self._extent_retry_attempted
+        ):
+            self._extent_retry_attempted = True
+            orbital_id = get_orbital_by_display_name(self.state.orbital_name).orbital_id
+            mode_key = _mode_key_from_label(self.state.projection_mode)
+            old_extent = self._extent
+            new_extent = math.ceil((old_extent * 1.25 * 1.20) / 10.0) * 10.0
+            EXTENT_TABLE[(orbital_id, mode_key)] = float(new_extent)
+            _persist_extent_table(EXTENT_TABLE)
+            self.log_panel.appendPlainText(
+                "extent_table updated: {key}: {old:.1f} -> {new:.1f} (clipping detected; retried once)".format(
+                    key=f"{orbital_id}|{mode_key}",
+                    old=old_extent,
+                    new=new_extent,
+                )
+            )
+            self._start_render(self._resolve_quality_label(final=True), "extent-retry")
+        elif info.get("clipped") and self._extent_retry_attempted:
+            self.log_panel.appendPlainText(
+                "extent retry failed: still clipped after retry (extent={:.1f})".format(self._extent)
+            )
 
         self.log_panel.appendPlainText(
             "视图 {view} 体积：缓存 {vol}".format(
@@ -1653,40 +1699,8 @@ class MainWindow(QtWidgets.QMainWindow):
         orbital = get_orbital_by_display_name(self.state.orbital_name)
         return orbital.n
 
-    def _compute_auto_extent(self, n: int) -> float:
-        return self._extent_base + self._extent_step * max(n - 1, 0)
-
     def _snap_resolution(self, target: int) -> int:
         return min(self._allowed_resolutions, key=lambda res: abs(res - target))
-
-    def _apply_extent_resolution(self, base_resolution: int) -> int:
-        if not self.state.auto_extent:
-            return base_resolution
-        target = int(round((2 * self._extent) / self._dx_target))
-        snapped = self._snap_resolution(target)
-        return max(base_resolution, snapped)
-
-    def _refresh_extent_settings(self) -> None:
-        if self.state.auto_extent:
-            base_extent = self._compute_auto_extent(self._current_orbital_n())
-            self.state.extent_base = base_extent
-            self.state.extent_effective = base_extent
-            self.extent_slider.blockSignals(True)
-            self.extent_slider.setValue(int(base_extent * 10))
-            self.extent_slider.blockSignals(False)
-            self.extent_value.setText(f"{self.state.extent_effective:.1f}")
-            self.extent_slider.setEnabled(False)
-        else:
-            base_extent = max(
-                self._extent_min, min(self.state.extent_base, self._extent_max)
-            )
-            self.state.extent_base = base_extent
-            self.state.extent_effective = base_extent
-            self.extent_slider.setEnabled(True)
-            self.extent_slider.blockSignals(True)
-            self.extent_slider.setValue(int(base_extent * 10))
-            self.extent_slider.blockSignals(False)
-            self.extent_value.setText(f"{self.state.extent_effective:.1f}")
 
     def _clear_views(self) -> None:
         for view in self.projection_views.values():
