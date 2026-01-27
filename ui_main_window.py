@@ -1,7 +1,9 @@
 import time
 import threading
 from collections import OrderedDict
+from concurrent.futures import ProcessPoolExecutor, as_completed
 import numpy as np
+from numba import njit, prange
 from PySide6 import QtCore, QtGui, QtWidgets
 from shiboken6 import isValid
 from skimage import measure
@@ -35,8 +37,178 @@ class LRUCache:
             self._data.popitem(last=False)
 
 
+_ORBITAL_INDEX = {
+    "4d_1s": 0,
+    "4d_p_real": 1,
+    "4d_d_real": 2,
+    "demo_fake": 3,
+}
+
+_VIEW_AXIS = {"X": 0, "Y": 1, "Z": 2, "W": 3}
+
+
+@njit(parallel=True)
+def _integral_volume_kernel(
+    view_axis: int,
+    coords: np.ndarray,
+    nodes: np.ndarray,
+    weights: np.ndarray,
+    rotation: np.ndarray,
+    orbital_index: int,
+    mode_flag: int,
+) -> np.ndarray:
+    n = coords.size
+    total = n * n * n
+    out = np.empty(total, dtype=np.float64)
+    eps = 1e-12
+    sqrt2 = np.sqrt(2.0)
+
+    for idx in prange(total):
+        i = idx // (n * n)
+        j = (idx // n) % n
+        k = idx % n
+
+        if view_axis == 0:
+            base_x = 0.0
+            base_y = coords[i]
+            base_z = coords[j]
+            base_w = coords[k]
+        elif view_axis == 1:
+            base_x = coords[i]
+            base_y = 0.0
+            base_z = coords[j]
+            base_w = coords[k]
+        elif view_axis == 2:
+            base_x = coords[i]
+            base_y = coords[j]
+            base_z = 0.0
+            base_w = coords[k]
+        else:
+            base_x = coords[i]
+            base_y = coords[j]
+            base_z = coords[k]
+            base_w = 0.0
+
+        acc = 0.0
+        max_val = 0.0
+        for m in range(nodes.size):
+            if view_axis == 0:
+                x = nodes[m]
+                y = base_y
+                z = base_z
+                w = base_w
+            elif view_axis == 1:
+                x = base_x
+                y = nodes[m]
+                z = base_z
+                w = base_w
+            elif view_axis == 2:
+                x = base_x
+                y = base_y
+                z = nodes[m]
+                w = base_w
+            else:
+                x = base_x
+                y = base_y
+                z = base_z
+                w = nodes[m]
+
+            xr = (
+                x * rotation[0, 0]
+                + y * rotation[0, 1]
+                + z * rotation[0, 2]
+                + w * rotation[0, 3]
+            )
+            yr = (
+                x * rotation[1, 0]
+                + y * rotation[1, 1]
+                + z * rotation[1, 2]
+                + w * rotation[1, 3]
+            )
+            zr = (
+                x * rotation[2, 0]
+                + y * rotation[2, 1]
+                + z * rotation[2, 2]
+                + w * rotation[2, 3]
+            )
+            wr = (
+                x * rotation[3, 0]
+                + y * rotation[3, 1]
+                + z * rotation[3, 2]
+                + w * rotation[3, 3]
+            )
+
+            r = np.sqrt(xr * xr + yr * yr + zr * zr + wr * wr)
+            if orbital_index == 0:
+                angular = 1.0
+                radial = np.exp(-r)
+                psi = radial * angular
+            elif orbital_index == 1:
+                if r > eps:
+                    angular = (xr + wr) / (r * sqrt2)
+                else:
+                    angular = 0.0
+                radial = np.exp(-(1.1 / 2.0) * r)
+                psi = radial * angular
+            elif orbital_index == 2:
+                if r > eps:
+                    angular = (xr * xr - yr * yr) / (r * r)
+                else:
+                    angular = 0.0
+                radial = np.exp(-(1.15 / 3.0) * r)
+                psi = radial * angular
+            else:
+                psi = np.exp(-r) * (xr * xr - yr * yr + 0.35 * zr - 0.25 * wr)
+
+            if mode_flag == 0:
+                acc += psi * weights[m]
+            elif mode_flag == 1:
+                acc += abs(psi) * weights[m]
+            else:
+                val = abs(psi)
+                if val > max_val:
+                    max_val = val
+
+        out[idx] = acc if mode_flag != 2 else max_val
+
+    return out.reshape((n, n, n))
+
+
+def _compute_integral_volume_task(
+    view_id: str,
+    resolution: int,
+    extent: float,
+    rotation: np.ndarray,
+    samples: int,
+    mode: str,
+    orbital_id: str,
+) -> tuple[str, np.ndarray]:
+    coords = np.linspace(-extent, extent, resolution, dtype=np.float64)
+    nodes, weights = np.polynomial.legendre.leggauss(samples)
+    nodes = nodes * extent
+    weights = weights * extent
+    view_axis = _VIEW_AXIS[view_id]
+    orbital_index = _ORBITAL_INDEX.get(orbital_id, 0)
+    if mode.startswith("积分 ψ"):
+        mode_flag = 0
+    elif mode.startswith("积分 |ψ|"):
+        mode_flag = 1
+    else:
+        mode_flag = 2
+    volume = _integral_volume_kernel(
+        view_axis,
+        coords,
+        nodes,
+        weights,
+        rotation,
+        orbital_index,
+        mode_flag,
+    )
+    return view_id, volume
+
+
 def _volume_cache_key(
-    orbital_name: str,
+    orbital_id: str,
     projection_mode: str,
     angles: dict,
     resolution: int,
@@ -46,7 +218,7 @@ def _volume_cache_key(
 ) -> tuple:
     angle_tuple = tuple(angles[name] for name in ["xy", "xz", "xw", "yz", "yw", "zw"])
     sample_value = samples if not projection_mode.startswith("切片") else 0
-    return (orbital_name, projection_mode, angle_tuple, resolution, sample_value, extent, view_id)
+    return (orbital_id, projection_mode, angle_tuple, resolution, sample_value, extent, view_id)
 
 
 def _mesh_cache_key(volume_key: tuple, iso_value: float, sign: int) -> tuple:
@@ -237,6 +409,8 @@ class RenderWorker(QtCore.QObject):
         samples = self._params["samples"]
         iso_percent = self._params["iso_percent"]
         extent = self._params["extent"]
+        orbital_id = self._params["orbital_id"]
+        allow_mesh = self._params.get("allow_mesh", True)
 
         self.log_line.emit(
             "渲染#{rid} 开始（{quality}）：模式={mode}, N={res}, M={samples}".format(
@@ -249,53 +423,14 @@ class RenderWorker(QtCore.QObject):
         )
 
         rotation = _compose_rotation_matrix_from_angles(self._params["angles"])
-        for index, view_id in enumerate(["X", "Y", "Z", "W"], start=1):
+        rotation = np.ascontiguousarray(rotation, dtype=np.float64)
+        view_ids = ["X", "Y", "Z", "W"]
+        view_index = {view_id: idx for idx, view_id in enumerate(view_ids, start=1)}
+
+        def handle_volume(view_id: str, vol: np.ndarray, volume_hit: bool) -> None:
             if self._cancel_event.is_set():
-                break
-
+                return
             view_start = time.perf_counter()
-            volume_key = _volume_cache_key(
-                self._params["orbital_name"],
-                mode,
-                self._params["angles"],
-                resolution,
-                samples,
-                extent,
-                view_id,
-            )
-
-            volume_hit = False
-            with self._cache_lock:
-                volume_hit, cached_vol = self._volume_cache.get_with_hit(volume_key)
-            if volume_hit:
-                vol = cached_vol
-            else:
-                if mode.startswith("切片"):
-                    vol = _generate_slice_volume(
-                        view_id,
-                        resolution,
-                        extent,
-                        rotation,
-                        self._params["orbital_name"],
-                    )
-                else:
-                    vol = _generate_integral_volume(
-                        view_id,
-                        resolution,
-                        extent,
-                        rotation,
-                        samples,
-                        mode,
-                        self._params["orbital_name"],
-                        cancel_event=self._cancel_event,
-                    )
-                    if vol is None:
-                        break
-                if vol.size and not np.isfinite(vol).all():
-                    vol = np.array([])
-                with self._cache_lock:
-                    self._volume_cache.set(volume_key, vol)
-
             vol_min = float(np.min(vol)) if vol.size else 0.0
             vol_max = float(np.max(vol)) if vol.size else 0.0
             max_abs = max(abs(vol_min), abs(vol_max)) if vol.size else 0.0
@@ -308,6 +443,16 @@ class RenderWorker(QtCore.QObject):
             mesh_neg = None
             mesh_pos_reason = ""
             mesh_neg_reason = ""
+
+            volume_key = _volume_cache_key(
+                orbital_id,
+                mode,
+                self._params["angles"],
+                resolution,
+                samples,
+                extent,
+                view_id,
+            )
 
             if iso_value > 0 and vol.size:
                 pos_key = _mesh_cache_key(volume_key, iso_value, 1)
@@ -322,17 +467,23 @@ class RenderWorker(QtCore.QObject):
                     mesh_neg = cached_neg
 
                 if mesh_pos is None:
-                    mesh_pos, mesh_pos_reason = _extract_mesh(vol, iso_value, extent)
-                    with self._cache_lock:
-                        self._mesh_cache.set(pos_key, mesh_pos)
+                    if allow_mesh:
+                        mesh_pos, mesh_pos_reason = _extract_mesh(vol, iso_value, extent)
+                        with self._cache_lock:
+                            self._mesh_cache.set(pos_key, mesh_pos)
+                    else:
+                        mesh_pos_reason = "throttled"
                 if not is_non_negative_mode and mesh_neg is None:
-                    mesh_neg, mesh_neg_reason = _extract_mesh(vol, -iso_value, extent)
-                    with self._cache_lock:
-                        self._mesh_cache.set(neg_key, mesh_neg)
+                    if allow_mesh:
+                        mesh_neg, mesh_neg_reason = _extract_mesh(vol, -iso_value, extent)
+                        with self._cache_lock:
+                            self._mesh_cache.set(neg_key, mesh_neg)
+                    else:
+                        mesh_neg_reason = "throttled"
 
             view_time_ms = int((time.perf_counter() - view_start) * 1000)
             info = {
-                "view_index": index,
+                "view_index": view_index[view_id],
                 "volume_hit": volume_hit,
                 "mesh_hit_pos": mesh_hit_pos,
                 "mesh_hit_neg": mesh_hit_neg,
@@ -349,6 +500,82 @@ class RenderWorker(QtCore.QObject):
                 "mesh_neg_reason": mesh_neg_reason,
             }
             self.view_ready.emit(self._request_id, view_id, mesh_pos, mesh_neg, info)
+
+        if mode.startswith("切片"):
+            for view_id in view_ids:
+                if self._cancel_event.is_set():
+                    break
+                volume_key = _volume_cache_key(
+                    orbital_id,
+                    mode,
+                    self._params["angles"],
+                    resolution,
+                    samples,
+                    extent,
+                    view_id,
+                )
+                with self._cache_lock:
+                    volume_hit, cached_vol = self._volume_cache.get_with_hit(volume_key)
+                if volume_hit:
+                    vol = cached_vol
+                else:
+                    vol = _generate_slice_volume(
+                        view_id,
+                        resolution,
+                        extent,
+                        rotation,
+                        self._params["orbital_name"],
+                    )
+                    if vol.size and not np.isfinite(vol).all():
+                        vol = np.array([])
+                    with self._cache_lock:
+                        self._volume_cache.set(volume_key, vol)
+                handle_volume(view_id, vol, volume_hit)
+        else:
+            futures = {}
+            with ProcessPoolExecutor(max_workers=4) as executor:
+                for view_id in view_ids:
+                    if self._cancel_event.is_set():
+                        break
+                    volume_key = _volume_cache_key(
+                        orbital_id,
+                        mode,
+                        self._params["angles"],
+                        resolution,
+                        samples,
+                        extent,
+                        view_id,
+                    )
+                    with self._cache_lock:
+                        volume_hit, cached_vol = self._volume_cache.get_with_hit(volume_key)
+                    if volume_hit:
+                        handle_volume(view_id, cached_vol, True)
+                        continue
+                    future = executor.submit(
+                        _compute_integral_volume_task,
+                        view_id,
+                        resolution,
+                        extent,
+                        rotation,
+                        samples,
+                        mode,
+                        orbital_id,
+                    )
+                    futures[future] = volume_key
+
+                for future in as_completed(futures):
+                    volume_key = futures[future]
+                    try:
+                        view_id, vol = future.result()
+                    except Exception:
+                        continue
+                    if self._cancel_event.is_set():
+                        continue
+                    if vol.size and not np.isfinite(vol).all():
+                        vol = np.array([])
+                    with self._cache_lock:
+                        self._volume_cache.set(volume_key, vol)
+                    handle_volume(view_id, vol, False)
 
         total_ms = int((time.perf_counter() - start_total) * 1000)
         self.log_line.emit(f"渲染#{self._request_id} 完成，用时 {total_ms} ms")
@@ -436,6 +663,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.state = AppState()
         self._ready = False
         self._extent = 8.0
+        self._last_mesh_time = 0.0
+        self._mesh_throttle_s = 0.3
         self._render_timer = QtCore.QTimer(self)
         self._render_timer.setSingleShot(True)
         self._render_timer.timeout.connect(self._trigger_scheduled_render)
@@ -848,11 +1077,12 @@ class MainWindow(QtWidgets.QMainWindow):
         angles = dict(self.state.angles)
         extent = self._extent
         iso_percent = self.state.iso_percent
+        orbital_id = get_orbital_by_display_name(self.state.orbital_name).orbital_id
 
         volume_hits: dict[str, np.ndarray] = {}
         for view_id in ["X", "Y", "Z", "W"]:
             volume_key = _volume_cache_key(
-                self.state.orbital_name,
+                orbital_id,
                 mode,
                 angles,
                 resolution,
@@ -908,9 +1138,19 @@ class MainWindow(QtWidgets.QMainWindow):
         self._active_request_id = request_id
         self._cancel_event = threading.Event()
 
+        orbital = get_orbital_by_display_name(self.state.orbital_name)
+        allow_mesh = True
+        if not self.state.projection_mode.startswith("切片") and quality_label == "预览":
+            now = time.perf_counter()
+            if now - self._last_mesh_time < self._mesh_throttle_s:
+                allow_mesh = False
+            else:
+                self._last_mesh_time = now
+
         resolution, samples = self._quality_to_settings(quality_label)
         params = {
             "orbital_name": self.state.orbital_name,
+            "orbital_id": orbital.orbital_id,
             "projection_mode": self.state.projection_mode,
             "mode": self.state.projection_mode,
             "angles": dict(self.state.angles),
@@ -919,6 +1159,7 @@ class MainWindow(QtWidgets.QMainWindow):
             "iso_percent": self.state.iso_percent,
             "extent": self._extent,
             "quality_label": quality_label,
+            "allow_mesh": allow_mesh,
         }
 
         reason_map = {
@@ -989,25 +1230,30 @@ class MainWindow(QtWidgets.QMainWindow):
             self.log_panel.appendPlainText(f"视图 {view_id} 网格：跳过（iso=0）")
         else:
             if mesh_pos_data is None:
-                self.log_panel.appendPlainText(
-                    "视图 {view} 无网格（level 超界或拓扑为空）：level={level:.4f}, "
-                    "vol_min={vmin:.4f}, vol_max={vmax:.4f}".format(
-                        view=view_id,
-                        level=info["iso_value"],
-                        vmin=info["vol_min"],
-                        vmax=info["vol_max"],
+                if info.get("mesh_pos_reason") == "throttled":
+                    self.log_panel.appendPlainText(
+                        f"视图 {view_id} 网格：节流跳过（预览）"
                     )
-                )
-                self.status_bar.showMessage(
-                    "模式={mode} | 质量={quality} | 无网格：level={level:.4f}, "
-                    "min={vmin:.4f}, max={vmax:.4f}".format(
-                        mode=info["mode"],
-                        quality=quality_label,
-                        level=info["iso_value"],
-                        vmin=info["vol_min"],
-                        vmax=info["vol_max"],
+                else:
+                    self.log_panel.appendPlainText(
+                        "视图 {view} 无网格（level 超界或拓扑为空）：level={level:.4f}, "
+                        "vol_min={vmin:.4f}, vol_max={vmax:.4f}".format(
+                            view=view_id,
+                            level=info["iso_value"],
+                            vmin=info["vol_min"],
+                            vmax=info["vol_max"],
+                        )
                     )
-                )
+                    self.status_bar.showMessage(
+                        "模式={mode} | 质量={quality} | 无网格：level={level:.4f}, "
+                        "min={vmin:.4f}, max={vmax:.4f}".format(
+                            mode=info["mode"],
+                            quality=quality_label,
+                            level=info["iso_value"],
+                            vmin=info["vol_min"],
+                            vmax=info["vol_max"],
+                        )
+                    )
             else:
                 self.log_panel.appendPlainText(
                     "视图 {view} 网格：缓存 {mesh}".format(
