@@ -1253,12 +1253,6 @@ class MainWindow(QtWidgets.QMainWindow):
         layout.addWidget(QtWidgets.QLabel("投影模式"))
         layout.addWidget(self.projection_mode)
 
-        iso_layout = QtWidgets.QHBoxLayout()
-        iso_layout.addWidget(QtWidgets.QLabel("等值面级别"))
-        iso_layout.addStretch(1)
-        iso_layout.addWidget(QtWidgets.QLabel(f"固定 {ISO_PERCENT_FIXED}%"))
-        layout.addLayout(iso_layout)
-
         layout.addWidget(QtWidgets.QLabel("分辨率"))
         layout.addWidget(self.resolution_combo)
 
