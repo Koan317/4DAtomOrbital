@@ -96,7 +96,6 @@ class ProjectionViewWidget(QtWidgets.QWidget):
 
         title_label = QtWidgets.QLabel(title)
         title_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignLeft)
-        title_label.setStyleSheet("color: #dddddd;")
         layout.addWidget(title_label)
 
         self.plotter = QtInteractor(self)
