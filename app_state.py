@@ -5,7 +5,8 @@ from dataclasses import dataclass, field
 class AppState:
     orbital_name: str = "1s(k=0)"
     auto_extent: bool = True
-    extent: float = 6.0
+    extent_base: float = 6.0
+    extent_effective: float = 10.0
     angles: dict = field(
         default_factory=lambda: {
             "xy": 0,
@@ -40,7 +41,7 @@ class AppState:
         return (
             f"轨道={self.orbital_name}, 角度=[{self.angle_summary()}], "
             f"模式={self.projection_mode}, iso_fixed=12%, "
-            f"范围={self.extent:.1f}, 分辨率={self.resolution}, "
+            f"范围={self.extent_effective:.1f}, 分辨率={self.resolution}, "
             f"采样={self.integral_samples}, 自动精细化={self.auto_refine}, "
             f"自动范围={self.auto_extent}"
         )

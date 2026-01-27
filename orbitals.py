@@ -12,6 +12,7 @@ class Orbital:
     orbital_id: str
     display_name: str
     n: int = 1
+    l: int = 0
     description: str = ""
     parameters: dict = field(default_factory=dict)
     _evaluator: Callable[[np.ndarray, np.ndarray, np.ndarray, np.ndarray], np.ndarray] = (
@@ -75,6 +76,7 @@ def _make_family_orbital(l: int, k: int, alpha: float = 1.0, eps: float = 1e-12)
         orbital_id=display_name,
         display_name=display_name,
         n=n,
+        l=l,
         description=description,
         parameters={"n": n, "l": l, "k": k, "alpha": alpha, "eps": eps},
         _evaluator=evaluator,
@@ -97,6 +99,7 @@ DEMO_ORBITAL = Orbital(
     orbital_id="演示/假场 (Debug)",
     display_name="演示/假场 (Debug)",
     n=1,
+    l=0,
     description="演示用假场（Debug）",
     parameters={"note": "legacy demo field"},
     _evaluator=_fake_field,

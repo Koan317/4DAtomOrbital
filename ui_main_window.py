@@ -457,6 +457,12 @@ def _precheck_strict_integral(
     return vol_pre, metrics
 
 
+def _compute_effective_extent(base_extent: float, l_value: int) -> float:
+    factor = 1.0 + 0.05 * max(l_value, 0)
+    expanded = base_extent * factor
+    return float(math.ceil(expanded / 10.0) * 10.0)
+
+
 class RenderWorker(QtCore.QObject):
     view_ready = QtCore.Signal(int, str, object, object, dict)
     log_line = QtCore.Signal(str)
@@ -789,8 +795,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self._extent_max = 20.0
         self._dx_target = 0.25
         self._allowed_resolutions = [64, 96, 128, 160]
-        self._extent = self._compute_auto_extent(self._current_orbital_n())
-        self.state.extent = self._extent
+        base_extent = self._compute_auto_extent(self._current_orbital_n())
+        self._extent = _compute_effective_extent(base_extent, self._current_orbital_l())
+        self.state.extent_base = base_extent
+        self.state.extent_effective = self._extent
         self._last_mesh_time = 0.0
         self._mesh_throttle_s = 0.3
         self._render_timer = QtCore.QTimer(self)
@@ -952,7 +960,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self.extent_slider = QtWidgets.QSlider(QtCore.Qt.Orientation.Horizontal)
         self.extent_slider.setRange(int(self._extent_min * 10), int(self._extent_max * 10))
-        self.extent_slider.setValue(int(self._extent * 10))
+        self.extent_slider.setValue(int(self.state.extent_base * 10))
         self.extent_slider.valueChanged.connect(self._on_extent_changed)
         self.extent_slider.sliderReleased.connect(self._on_extent_released)
         self.extent_value = QtWidgets.QLabel(f"{self._extent:.1f}")
@@ -1052,8 +1060,8 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _on_extent_changed(self, value: int) -> None:
         extent = value / 10.0
-        self.extent_value.setText(f"{extent:.1f}")
-        self.state.extent = extent
+        self.state.extent_base = extent
+        self._refresh_extent_settings()
         self._handle_value_change("volume")
 
     def _on_extent_released(self) -> None:
@@ -1146,7 +1154,7 @@ class MainWindow(QtWidgets.QMainWindow):
             "angles": dict(self.state.angles),
             "resolution": self.state.resolution,
             "integral_samples": self.state.integral_samples,
-            "extent": self.state.extent,
+            "extent": self.state.extent_effective,
             "auto_extent": self.state.auto_extent,
             "preview_quality": self.state.preview_quality,
             "final_quality": self.state.final_quality,
@@ -1307,10 +1315,11 @@ class MainWindow(QtWidgets.QMainWindow):
         mesh_neg_data = mesh_neg if isinstance(mesh_neg, tuple) else None
         if info.get("strict_cancelled"):
             self.projection_views[view_id].set_meshes(None, None, 1.0)
-            self.projection_views[view_id].set_empty_overlay(True)
+            empty_view = True
         else:
             self.projection_views[view_id].set_meshes(mesh_pos_data, mesh_neg_data, 1.0)
-            self.projection_views[view_id].set_empty_overlay(False)
+            empty_view = mesh_pos_data is None and mesh_neg_data is None
+        self.projection_views[view_id].set_empty_message_visible(empty_view)
 
         self.log_panel.appendPlainText(
             "视图 {view} 体积：缓存 {vol}".format(
@@ -1427,6 +1436,10 @@ class MainWindow(QtWidgets.QMainWindow):
         orbital = get_orbital_by_display_name(self.state.orbital_name)
         return orbital.n
 
+    def _current_orbital_l(self) -> int:
+        orbital = get_orbital_by_display_name(self.state.orbital_name)
+        return orbital.l
+
     def _compute_auto_extent(self, n: int) -> float:
         return self._extent_base + self._extent_step * max(n - 1, 0)
 
@@ -1442,25 +1455,31 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _refresh_extent_settings(self) -> None:
         if self.state.auto_extent:
-            extent = self._compute_auto_extent(self._current_orbital_n())
-            self._extent = extent
-            self.state.extent = extent
+            base_extent = self._compute_auto_extent(self._current_orbital_n())
+            effective_extent = _compute_effective_extent(base_extent, self._current_orbital_l())
+            self._extent = effective_extent
+            self.state.extent_base = base_extent
+            self.state.extent_effective = effective_extent
             self.extent_slider.blockSignals(True)
-            self.extent_slider.setValue(int(extent * 10))
+            self.extent_slider.setValue(int(base_extent * 10))
             self.extent_slider.blockSignals(False)
-            self.extent_value.setText(f"{extent:.1f}")
+            self.extent_value.setText(f"{effective_extent:.1f}")
             self.extent_slider.setEnabled(False)
         else:
-            extent = max(self._extent_min, min(self.state.extent, self._extent_max))
-            self._extent = extent
-            self.state.extent = extent
+            base_extent = max(
+                self._extent_min, min(self.state.extent_base, self._extent_max)
+            )
+            effective_extent = _compute_effective_extent(base_extent, self._current_orbital_l())
+            self._extent = effective_extent
+            self.state.extent_base = base_extent
+            self.state.extent_effective = effective_extent
             self.extent_slider.setEnabled(True)
             self.extent_slider.blockSignals(True)
-            self.extent_slider.setValue(int(extent * 10))
+            self.extent_slider.setValue(int(base_extent * 10))
             self.extent_slider.blockSignals(False)
-            self.extent_value.setText(f"{extent:.1f}")
+            self.extent_value.setText(f"{effective_extent:.1f}")
 
     def _clear_views(self) -> None:
         for view in self.projection_views.values():
             view.set_meshes(None, None, 1.0)
-            view.set_empty_overlay(False)
+            view.set_empty_message_visible(False)

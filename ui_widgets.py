@@ -156,10 +156,16 @@ class ProjectionViewWidget(QtWidgets.QWidget):
         self.plotter.render()
 
     def set_empty_overlay(self, visible: bool) -> None:
+        self.set_empty_message_visible(visible)
+
+    def set_empty_message_visible(self, visible: bool) -> None:
         if self._empty_overlay_visible == visible:
             return
         self._empty_overlay_visible = visible
         self._empty_overlay.setVisible(visible)
+
+    def set_empty_message_text(self, text: str) -> None:
+        self._empty_overlay.setText(text)
 
     def _add_mesh(
         self,
