@@ -89,6 +89,7 @@ class ProjectionViewWidget(QtWidgets.QWidget):
         self._extent = extent
         self._mesh_actors: dict[str, pv.Actor] = {}
         self._camera_initialized = False
+        self._empty_overlay_visible = False
 
         layout = QtWidgets.QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -100,7 +101,25 @@ class ProjectionViewWidget(QtWidgets.QWidget):
 
         self.plotter = QtInteractor(self)
         self.plotter.set_background("#111111")
-        layout.addWidget(self.plotter, 1)
+
+        self._view_container = QtWidgets.QWidget()
+        container_layout = QtWidgets.QGridLayout(self._view_container)
+        container_layout.setContentsMargins(0, 0, 0, 0)
+        container_layout.addWidget(self.plotter, 0, 0)
+
+        self._empty_overlay = QtWidgets.QLabel("无函数值，展示为空")
+        self._empty_overlay.setAlignment(
+            QtCore.Qt.AlignmentFlag.AlignCenter
+        )
+        self._empty_overlay.setStyleSheet(
+            "color: #e0e0e0; background-color: rgba(0, 0, 0, 140); "
+            "padding: 6px; border-radius: 6px;"
+        )
+        self._empty_overlay.setAttribute(QtCore.Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        self._empty_overlay.setVisible(False)
+        container_layout.addWidget(self._empty_overlay, 0, 0, QtCore.Qt.AlignmentFlag.AlignCenter)
+
+        layout.addWidget(self._view_container, 1)
 
     def set_meshes(
         self,
@@ -135,6 +154,12 @@ class ProjectionViewWidget(QtWidgets.QWidget):
             self.plotter.reset_camera()
             self._camera_initialized = True
         self.plotter.render()
+
+    def set_empty_overlay(self, visible: bool) -> None:
+        if self._empty_overlay_visible == visible:
+            return
+        self._empty_overlay_visible = visible
+        self._empty_overlay.setVisible(visible)
 
     def _add_mesh(
         self,
