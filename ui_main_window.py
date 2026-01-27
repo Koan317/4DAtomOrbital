@@ -110,6 +110,7 @@ def _generate_integral_volume(
     orbital_name: str,
     cancel_event: threading.Event | None = None,
 ) -> np.ndarray | None:
+    rotation = np.ascontiguousarray(rotation, dtype=np.float64)
     coords = np.linspace(-extent, extent, resolution)
     grid_a, grid_b, grid_c = np.meshgrid(coords, coords, coords, indexing="ij")
 
@@ -159,8 +160,14 @@ def _generate_integral_volume(
             w_vals = np.full_like(grid_flat, t_value, dtype=np.float64)
             points = np.stack([x_flat, y_flat, z_flat, w_vals], axis=1)
 
-        rotated = points @ rotation.T
-        xr, yr, zr, wr = rotated[:, 0], rotated[:, 1], rotated[:, 2], rotated[:, 3]
+        p0 = points[:, 0]
+        p1 = points[:, 1]
+        p2 = points[:, 2]
+        p3 = points[:, 3]
+        xr = p0 * rotation[0, 0] + p1 * rotation[0, 1] + p2 * rotation[0, 2] + p3 * rotation[0, 3]
+        yr = p0 * rotation[1, 0] + p1 * rotation[1, 1] + p2 * rotation[1, 2] + p3 * rotation[1, 3]
+        zr = p0 * rotation[2, 0] + p1 * rotation[2, 1] + p2 * rotation[2, 2] + p3 * rotation[2, 3]
+        wr = p0 * rotation[3, 0] + p1 * rotation[3, 1] + p2 * rotation[3, 2] + p3 * rotation[3, 3]
         psi = orbital.evaluate(xr, yr, zr, wr)
 
         if mode.startswith("积分 ψ"):
@@ -437,6 +444,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._render_worker: RenderWorker | None = None
         self._retired_threads: list[tuple[QtCore.QThread, RenderWorker, threading.Event]] = []
         self._last_params: dict | None = None
+        self._pending_render_request: tuple[str, str] | None = None
 
         self._build_status_bar()
         self._build_central()
@@ -855,15 +863,14 @@ class MainWindow(QtWidgets.QMainWindow):
             and self._render_worker is not None
             and self._cancel_event is not None
             and isValid(self._render_thread)
+            and self._render_thread.isRunning()
         ):
-            if self._cancel_event is not None:
-                self._cancel_event.set()
-            if self._render_thread.isRunning():
-                self._render_thread.quit()
-                self._render_thread.wait(10)
-            self._retired_threads.append(
-                (self._render_thread, self._render_worker, self._cancel_event)
+            self._cancel_event.set()
+            self._pending_render_request = (quality_label, reason)
+            self.log_panel.appendPlainText(
+                f"渲染请求已合并（{quality_label}，原因={reason}）"
             )
+            return
 
         self._render_request_id += 1
         request_id = self._render_request_id
@@ -972,6 +979,10 @@ class MainWindow(QtWidgets.QMainWindow):
             self._cleanup_retired_threads(force=False)
         except RuntimeError:
             self._retired_threads = []
+        if self._pending_render_request is not None:
+            quality_label, reason = self._pending_render_request
+            self._pending_render_request = None
+            self._start_render(quality_label, reason)
 
     def _cleanup_retired_threads(self, force: bool) -> None:
         remaining: list[tuple[QtCore.QThread, RenderWorker, threading.Event]] = []
