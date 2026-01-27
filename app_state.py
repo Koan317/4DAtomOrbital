@@ -20,8 +20,6 @@ class AppState:
     projection_mode: str = "切片（快速）"
     resolution: int = 64
     integral_samples: int = 32
-    live_update: bool = True
-    auto_refine: bool = True
     preview_quality: str = "快速"
     final_quality: str = "高"
 
@@ -32,7 +30,7 @@ class AppState:
 
     def status_text(self) -> str:
         angle_text = " ".join(
-            f"{key}={self.angles[key]:03d}°"
+            f"{key}={self.angles[key]}°"
             for key in ["xy", "xz", "xw", "yz", "yw", "zw"]
         )
         return f"轨道：{self.orbital_name} | {angle_text}"
@@ -42,6 +40,6 @@ class AppState:
             f"轨道={self.orbital_name}, 角度=[{self.angle_summary()}], "
             f"模式={self.projection_mode}, iso_fixed=3.0%, "
             f"范围={self.extent_effective:.1f}, 分辨率={self.resolution}, "
-            f"采样={self.integral_samples}, 自动精细化={self.auto_refine}, "
+            f"采样={self.integral_samples}, "
             f"自动范围={self.auto_extent}"
         )
