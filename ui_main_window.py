@@ -952,23 +952,33 @@ class MainWindow(QtWidgets.QMainWindow):
     def _on_render_thread_finished(self) -> None:
         self._render_thread = None
         self._render_worker = None
-        self._cleanup_retired_threads(force=False)
+        try:
+            self._cleanup_retired_threads(force=False)
+        except RuntimeError:
+            self._retired_threads = []
 
     def _cleanup_retired_threads(self, force: bool) -> None:
         remaining: list[tuple[QtCore.QThread, RenderWorker, threading.Event]] = []
         for thread, worker, cancel_event in self._retired_threads:
-            if not isValid(thread):
+            if thread is None or not isValid(thread):
+                continue
+            try:
+                running = thread.isRunning()
+            except RuntimeError:
                 continue
             if force:
                 cancel_event.set()
-                if thread.isRunning():
+                if running:
                     thread.quit()
                     thread.wait(1000)
                 continue
-            if thread.isRunning():
+            if running:
                 remaining.append((thread, worker, cancel_event))
             else:
-                thread.quit()
+                try:
+                    thread.quit()
+                except RuntimeError:
+                    continue
         self._retired_threads = remaining
 
     def _update_status(self, info: dict, view_index: int, cache_text: str) -> None:
