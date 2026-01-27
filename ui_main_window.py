@@ -19,6 +19,7 @@ from ui_widgets import ProjectionViewWidget, build_labeled_slider, build_title_l
 ISO_PERCENT_FIXED = 3.0
 STRICT_PRECHECK_SAMPLES = 8
 STRICT_CANCEL_TAU = 0.02
+STRICT_ISO_ABS_FLOOR = 1e-3
 
 MODE_KEY_MAP = {
     "切片（快速）": "slice",
@@ -548,15 +549,6 @@ def _cancellation_metrics(vol: np.ndarray, tau: float = STRICT_CANCEL_TAU) -> di
     return {"mean_abs": mean_abs, "max_abs": max_abs, "frac_small": frac_small}
 
 
-def _is_cancellation_dominated(metrics: dict) -> bool:
-    max_abs = metrics["max_abs"]
-    mean_abs = metrics["mean_abs"]
-    frac_small = metrics["frac_small"]
-    if max_abs <= 0:
-        return True
-    return frac_small > 0.98 or mean_abs < 0.01 * max_abs
-
-
 def _precheck_strict_integral(
     view_id: str,
     resolution: int,
@@ -768,17 +760,9 @@ class RenderWorker(QtCore.QObject):
             iso_value = (iso_percent / 100.0) * max_abs if iso_percent > 0 else 0.0
             is_non_negative_mode = mode.startswith("积分 |ψ|") or mode.startswith("最大 |ψ|")
             strict_mode = mode.startswith("积分 ψ")
-            precheck_metrics = precheck_metrics_map.get(view_id)
-            if strict_mode and precheck_metrics is not None:
-                cancellation_metrics = precheck_metrics
-                cancellation_dominated = True
-                strict_cancelled = True
-            else:
-                cancellation_metrics = _cancellation_metrics(vol) if strict_mode else None
-                cancellation_dominated = (
-                    _is_cancellation_dominated(cancellation_metrics) if cancellation_metrics else False
-                )
-            strict_cancelled = strict_mode and cancellation_dominated
+            strict_empty_info = strict_early_empty_info.get(view_id)
+            strict_cancelled = strict_mode and strict_empty_info is not None
+            strict_empty_reason = strict_empty_info.get("reason") if strict_empty_info else ""
 
             mesh_hit_pos = False
             mesh_hit_neg = False
@@ -824,8 +808,8 @@ class RenderWorker(QtCore.QObject):
                     else:
                         mesh_neg_reason = "throttled"
             elif strict_cancelled:
-                mesh_pos_reason = "strict-cancel"
-                mesh_neg_reason = "strict-cancel"
+                mesh_pos_reason = strict_empty_reason or "strict-empty"
+                mesh_neg_reason = strict_empty_reason or "strict-empty"
 
             clipped = False
             shell_max = 0.0
@@ -853,13 +837,14 @@ class RenderWorker(QtCore.QObject):
                 "mesh_pos_reason": mesh_pos_reason,
                 "mesh_neg_reason": mesh_neg_reason,
                 "strict_cancelled": strict_cancelled,
-                "cancellation_metrics": cancellation_metrics,
+                "strict_empty_info": strict_empty_info,
+                "strict_empty_reason": strict_empty_reason,
                 "clipped": clipped,
                 "shell_max": shell_max,
             }
             self.view_ready.emit(self._request_id, view_id, mesh_pos, mesh_neg, info)
 
-        precheck_metrics_map: dict[str, dict] = {}
+        strict_early_empty_info: dict[str, dict] = {}
 
         if mode.startswith("切片"):
             for view_id in view_ids:
@@ -919,15 +904,22 @@ class RenderWorker(QtCore.QObject):
                             rotation,
                             orbital_id,
                         )
-                        if _is_cancellation_dominated(metrics):
-                            precheck_metrics_map[view_id] = metrics
+                        max_abs_pre = metrics["max_abs"]
+                        iso_pre = (ISO_PERCENT_FIXED / 100.0) * max_abs_pre
+                        if max_abs_pre <= 0 or iso_pre < STRICT_ISO_ABS_FLOOR:
+                            strict_early_empty_info[view_id] = {
+                                "max_abs_pre": max_abs_pre,
+                                "iso_pre": iso_pre,
+                                "extent": extent,
+                                "reason": "strict-empty-floor",
+                            }
                             self.log_line.emit(
-                                "View {view}: strict cancellation -> empty (precheck mean_abs={mean:.3e}, "
-                                "max_abs={max:.3e}, frac_small={frac:.3f})".format(
+                                "View {view}: strict empty -> empty (max_abs_pre={max:.3e}, "
+                                "iso_pre={iso:.3e}, extent={extent:.1f})".format(
                                     view=view_id,
-                                    mean=metrics["mean_abs"],
-                                    max=metrics["max_abs"],
-                                    frac=metrics["frac_small"],
+                                    max=max_abs_pre,
+                                    iso=iso_pre,
+                                    extent=extent,
                                 )
                             )
                             empty_vol = np.array([])
@@ -1591,18 +1583,18 @@ class MainWindow(QtWidgets.QMainWindow):
             )
         )
         if info.get("strict_cancelled"):
-            metrics = info.get("cancellation_metrics") or {"mean_abs": 0.0, "max_abs": 0.0, "frac_small": 1.0}
+            strict_info = info.get("strict_empty_info") or {"max_abs_pre": 0.0, "iso_pre": 0.0, "extent": 0.0}
             self.log_panel.appendPlainText(
-                "View {view}: strict cancellation -> empty (mean_abs={mean:.3e}, "
-                "max_abs={max:.3e}, frac_small={frac:.3f})".format(
+                "View {view}: strict empty -> empty (max_abs_pre={max:.3e}, "
+                "iso_pre={iso:.3e}, extent={extent:.1f})".format(
                     view=view_id,
-                    mean=metrics["mean_abs"],
-                    max=metrics["max_abs"],
-                    frac=metrics["frac_small"],
+                    max=strict_info["max_abs_pre"],
+                    iso=strict_info["iso_pre"],
+                    extent=strict_info["extent"],
                 )
             )
             self.status_bar.showMessage(
-                "模式={mode} | 质量={quality} | View {view} 严格抵消为空".format(
+                "模式={mode} | 质量={quality} | View {view} 严格预检为空".format(
                     mode=info["mode"],
                     quality=quality_label,
                     view=view_id,
