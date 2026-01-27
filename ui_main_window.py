@@ -18,6 +18,128 @@ ISO_PERCENT_FIXED = 3.0
 STRICT_PRECHECK_SAMPLES = 8
 STRICT_CANCEL_TAU = 0.02
 
+MODE_KEY_MAP = {
+    "切片（快速）": "slice",
+    "积分 ψ（严格）": "integral_strict",
+    "积分 |ψ|（稳定）": "integral_abs",
+    "最大 |ψ|（可视化）": "max_abs",
+}
+
+EXTENT_TABLE = {
+    ("1s(k=0)", "slice"): 10.0,
+    ("1s(k=0)", "integral_strict"): 10.0,
+    ("1s(k=0)", "integral_abs"): 10.0,
+    ("1s(k=0)", "max_abs"): 10.0,
+    ("2p(k=0)", "slice"): 10.0,
+    ("2p(k=0)", "integral_strict"): 10.0,
+    ("2p(k=0)", "integral_abs"): 10.0,
+    ("2p(k=0)", "max_abs"): 10.0,
+    ("2p(k=1)", "slice"): 10.0,
+    ("2p(k=1)", "integral_strict"): 10.0,
+    ("2p(k=1)", "integral_abs"): 10.0,
+    ("2p(k=1)", "max_abs"): 10.0,
+    ("3d(k=0)", "slice"): 20.0,
+    ("3d(k=0)", "integral_strict"): 20.0,
+    ("3d(k=0)", "integral_abs"): 20.0,
+    ("3d(k=0)", "max_abs"): 20.0,
+    ("3d(k=1)", "slice"): 20.0,
+    ("3d(k=1)", "integral_strict"): 20.0,
+    ("3d(k=1)", "integral_abs"): 20.0,
+    ("3d(k=1)", "max_abs"): 20.0,
+    ("3d(k=2)", "slice"): 20.0,
+    ("3d(k=2)", "integral_strict"): 20.0,
+    ("3d(k=2)", "integral_abs"): 20.0,
+    ("3d(k=2)", "max_abs"): 20.0,
+    ("4f(k=0)", "slice"): 20.0,
+    ("4f(k=0)", "integral_strict"): 20.0,
+    ("4f(k=0)", "integral_abs"): 20.0,
+    ("4f(k=0)", "max_abs"): 20.0,
+    ("4f(k=1)", "slice"): 20.0,
+    ("4f(k=1)", "integral_strict"): 20.0,
+    ("4f(k=1)", "integral_abs"): 20.0,
+    ("4f(k=1)", "max_abs"): 20.0,
+    ("4f(k=2)", "slice"): 20.0,
+    ("4f(k=2)", "integral_strict"): 20.0,
+    ("4f(k=2)", "integral_abs"): 20.0,
+    ("4f(k=2)", "max_abs"): 20.0,
+    ("4f(k=3)", "slice"): 20.0,
+    ("4f(k=3)", "integral_strict"): 20.0,
+    ("4f(k=3)", "integral_abs"): 20.0,
+    ("4f(k=3)", "max_abs"): 20.0,
+    ("5g(k=0)", "slice"): 30.0,
+    ("5g(k=0)", "integral_strict"): 30.0,
+    ("5g(k=0)", "integral_abs"): 30.0,
+    ("5g(k=0)", "max_abs"): 30.0,
+    ("5g(k=1)", "slice"): 30.0,
+    ("5g(k=1)", "integral_strict"): 30.0,
+    ("5g(k=1)", "integral_abs"): 30.0,
+    ("5g(k=1)", "max_abs"): 30.0,
+    ("5g(k=2)", "slice"): 30.0,
+    ("5g(k=2)", "integral_strict"): 30.0,
+    ("5g(k=2)", "integral_abs"): 30.0,
+    ("5g(k=2)", "max_abs"): 30.0,
+    ("5g(k=3)", "slice"): 30.0,
+    ("5g(k=3)", "integral_strict"): 30.0,
+    ("5g(k=3)", "integral_abs"): 30.0,
+    ("5g(k=3)", "max_abs"): 30.0,
+    ("5g(k=4)", "slice"): 30.0,
+    ("5g(k=4)", "integral_strict"): 30.0,
+    ("5g(k=4)", "integral_abs"): 30.0,
+    ("5g(k=4)", "max_abs"): 30.0,
+    ("6h(k=0)", "slice"): 30.0,
+    ("6h(k=0)", "integral_strict"): 30.0,
+    ("6h(k=0)", "integral_abs"): 30.0,
+    ("6h(k=0)", "max_abs"): 30.0,
+    ("6h(k=1)", "slice"): 30.0,
+    ("6h(k=1)", "integral_strict"): 30.0,
+    ("6h(k=1)", "integral_abs"): 30.0,
+    ("6h(k=1)", "max_abs"): 30.0,
+    ("6h(k=2)", "slice"): 30.0,
+    ("6h(k=2)", "integral_strict"): 30.0,
+    ("6h(k=2)", "integral_abs"): 30.0,
+    ("6h(k=2)", "max_abs"): 30.0,
+    ("6h(k=3)", "slice"): 30.0,
+    ("6h(k=3)", "integral_strict"): 30.0,
+    ("6h(k=3)", "integral_abs"): 30.0,
+    ("6h(k=3)", "max_abs"): 30.0,
+    ("6h(k=4)", "slice"): 30.0,
+    ("6h(k=4)", "integral_strict"): 30.0,
+    ("6h(k=4)", "integral_abs"): 30.0,
+    ("6h(k=4)", "max_abs"): 30.0,
+    ("6h(k=5)", "slice"): 30.0,
+    ("6h(k=5)", "integral_strict"): 30.0,
+    ("6h(k=5)", "integral_abs"): 30.0,
+    ("6h(k=5)", "max_abs"): 30.0,
+    ("7i(k=0)", "slice"): 30.0,
+    ("7i(k=0)", "integral_strict"): 30.0,
+    ("7i(k=0)", "integral_abs"): 30.0,
+    ("7i(k=0)", "max_abs"): 30.0,
+    ("7i(k=1)", "slice"): 30.0,
+    ("7i(k=1)", "integral_strict"): 30.0,
+    ("7i(k=1)", "integral_abs"): 30.0,
+    ("7i(k=1)", "max_abs"): 30.0,
+    ("7i(k=2)", "slice"): 30.0,
+    ("7i(k=2)", "integral_strict"): 30.0,
+    ("7i(k=2)", "integral_abs"): 30.0,
+    ("7i(k=2)", "max_abs"): 30.0,
+    ("7i(k=3)", "slice"): 30.0,
+    ("7i(k=3)", "integral_strict"): 30.0,
+    ("7i(k=3)", "integral_abs"): 30.0,
+    ("7i(k=3)", "max_abs"): 30.0,
+    ("7i(k=4)", "slice"): 30.0,
+    ("7i(k=4)", "integral_strict"): 30.0,
+    ("7i(k=4)", "integral_abs"): 30.0,
+    ("7i(k=4)", "max_abs"): 30.0,
+    ("7i(k=5)", "slice"): 30.0,
+    ("7i(k=5)", "integral_strict"): 30.0,
+    ("7i(k=5)", "integral_abs"): 30.0,
+    ("7i(k=5)", "max_abs"): 30.0,
+    ("7i(k=6)", "slice"): 30.0,
+    ("7i(k=6)", "integral_strict"): 30.0,
+    ("7i(k=6)", "integral_abs"): 30.0,
+    ("7i(k=6)", "max_abs"): 30.0,
+}
+
 
 class LRUCache:
     def __init__(self, max_items: int) -> None:
@@ -455,6 +577,97 @@ def _precheck_strict_integral(
     )
     metrics = _cancellation_metrics(vol_pre)
     return vol_pre, metrics
+
+
+def _mode_key_from_label(mode_label: str) -> str:
+    return MODE_KEY_MAP.get(mode_label, "slice")
+
+
+def _boundary_max_abs(vol: np.ndarray) -> float:
+    if vol.size == 0:
+        return 0.0
+    abs_vol = np.abs(vol)
+    return float(
+        max(
+            abs_vol[0, :, :].max(),
+            abs_vol[-1, :, :].max(),
+            abs_vol[:, 0, :].max(),
+            abs_vol[:, -1, :].max(),
+            abs_vol[:, :, 0].max(),
+            abs_vol[:, :, -1].max(),
+        )
+    )
+
+
+def calibrate_extents(
+    rotations: int = 32,
+    seed: int = 42,
+    n_pre: int = 32,
+    m_pre: int = 10,
+    max_iter: int = 6,
+    base_extent: float = 6.0,
+) -> dict[tuple[str, str], float]:
+    rng = np.random.default_rng(seed)
+    orbitals = [orb for orb in list_orbitals(include_demo=True) if orb.display_name != DEMO_ORBITAL.display_name]
+    mode_keys = list(MODE_KEY_MAP.values())
+    angles_list = [
+        {
+            "xy": float(rng.uniform(0, 360)),
+            "xz": float(rng.uniform(0, 360)),
+            "xw": float(rng.uniform(0, 360)),
+            "yz": float(rng.uniform(0, 360)),
+            "yw": float(rng.uniform(0, 360)),
+            "zw": float(rng.uniform(0, 360)),
+        }
+        for _ in range(rotations)
+    ]
+
+    table: dict[tuple[str, str], float] = {}
+    coords = np.linspace(-base_extent, base_extent, n_pre, dtype=np.float64)
+    nodes, weights = np.polynomial.legendre.leggauss(m_pre)
+    nodes = nodes * base_extent
+    weights = weights * base_extent
+
+    for orb in orbitals:
+        for mode_key in mode_keys:
+            required = base_extent
+            for angles in angles_list:
+                rotation = _compose_rotation_matrix_from_angles(angles)
+                extent = base_extent
+                for _ in range(max_iter):
+                    if mode_key == "slice":
+                        vols = [
+                            _generate_slice_volume(view_id, n_pre, extent, rotation, orb.display_name)
+                            for view_id in ["X", "Y", "Z", "W"]
+                        ]
+                    else:
+                        mode_flag = 0 if mode_key == "integral_strict" else 1 if mode_key == "integral_abs" else 2
+                        vols = [
+                            _integral_volume_kernel(
+                                _VIEW_AXIS[view_id],
+                                np.linspace(-extent, extent, n_pre, dtype=np.float64),
+                                nodes * (extent / base_extent),
+                                weights * (extent / base_extent),
+                                rotation,
+                                _ORBITAL_INDEX[orb.orbital_id],
+                                mode_flag,
+                            )
+                            for view_id in ["X", "Y", "Z", "W"]
+                        ]
+
+                    max_abs = max(float(np.max(np.abs(vol))) for vol in vols) if vols else 0.0
+                    if max_abs == 0.0:
+                        break
+                    iso_value = (ISO_PERCENT_FIXED / 100.0) * max_abs
+                    shell_max = max(_boundary_max_abs(vol) for vol in vols)
+                    if shell_max >= iso_value:
+                        extent *= 1.25
+                        continue
+                    break
+                required = max(required, extent)
+            final = math.ceil((1.2 * required) / 10.0) * 10.0
+            table[(orb.orbital_id, mode_key)] = float(final)
+    return table
 
 
 class RenderWorker(QtCore.QObject):
@@ -1229,7 +1442,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self._clear_views()
 
         orbital = get_orbital_by_display_name(self.state.orbital_name)
-        extent = orbital.recommended_extent(ISO_PERCENT_FIXED, margin=0.2)
+        mode_key = _mode_key_from_label(self.state.projection_mode)
+        extent = EXTENT_TABLE.get((orbital.orbital_id, mode_key), self.state.extent_base)
         self._extent = extent
         self.state.extent_effective = extent
         self.extent_value.setText(f"{extent:.1f}")
@@ -1267,7 +1481,13 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self._update_status(params, 0, "缓存=--")
         self.log_panel.appendPlainText(
-            f"渲染#{request_id} 已排队（{quality_label}，原因={reason_text}，iso_fixed={ISO_PERCENT_FIXED}%）"
+            "渲染#{rid} 已排队（{quality}，原因={reason}，iso_fixed={iso}%，extent={extent:.1f}）".format(
+                rid=request_id,
+                quality=quality_label,
+                reason=reason_text,
+                iso=ISO_PERCENT_FIXED,
+                extent=extent,
+            )
         )
 
         self._render_thread = QtCore.QThread(self)
