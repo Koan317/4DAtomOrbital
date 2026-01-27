@@ -536,9 +536,11 @@ class MainWindow(QtWidgets.QMainWindow):
                 lambda name=name: self._on_angle_released(name)
             )
             slider_grid.addWidget(widgets["label"], row, 0)
-            slider_grid.addWidget(widgets["slider"], row, 1)
-            slider_grid.addWidget(widgets["value_label"], row, 2)
-            slider_grid.addWidget(widgets["info_button"], row, 3)
+            slider_grid.addWidget(widgets["minus_button"], row, 1)
+            slider_grid.addWidget(widgets["slider"], row, 2)
+            slider_grid.addWidget(widgets["plus_button"], row, 3)
+            slider_grid.addWidget(widgets["value_label"], row, 4)
+            slider_grid.addWidget(widgets["info_button"], row, 5)
 
         layout.addLayout(slider_grid)
 
