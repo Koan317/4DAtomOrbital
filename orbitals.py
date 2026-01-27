@@ -13,7 +13,7 @@ class Orbital:
     display_name: str
     n: int = 1
     l: int = 0
-    description: str = ""
+    short_desc_zh: str = ""
     parameters: dict = field(default_factory=dict)
     _evaluator: Callable[[np.ndarray, np.ndarray, np.ndarray, np.ndarray], np.ndarray] = (
         lambda x, y, z, w: np.zeros_like(x)
@@ -59,7 +59,7 @@ def _make_family_orbital(l: int, k: int, alpha: float = 1.0, eps: float = 1e-12)
     n = l + 1
     letter_map = ["s", "p", "d", "f", "g", "h", "i"]
     display_name = f"{n}{letter_map[l]}(k={k})"
-    description = (
+    short_desc_zh = (
         "4D 分族：以 w 为极轴；k={k}；角向核 ∝ w^{l_minus_k}·Re((x+i y)^{k})/r^{l}"
     ).format(k=k, l_minus_k=l - k, l=l)
     terms = _transverse_terms(k)
@@ -87,7 +87,7 @@ def _make_family_orbital(l: int, k: int, alpha: float = 1.0, eps: float = 1e-12)
         display_name=display_name,
         n=n,
         l=l,
-        description=description,
+        short_desc_zh=short_desc_zh,
         parameters={"n": n, "l": l, "k": k, "alpha": alpha, "eps": eps},
         _evaluator=evaluator,
     )
@@ -110,7 +110,7 @@ DEMO_ORBITAL = Orbital(
     display_name="演示/假场 (Debug)",
     n=1,
     l=0,
-    description="演示用假场（Debug）",
+    short_desc_zh="演示用假场（Debug）",
     parameters={"note": "legacy demo field"},
     _evaluator=_fake_field,
 )
@@ -122,9 +122,32 @@ def list_orbitals(include_demo: bool = True) -> list[Orbital]:
     return list(ORBITALS)
 
 
+def get_orbital_manifest(include_demo: bool = True) -> list[dict]:
+    orbitals = list_orbitals(include_demo=include_demo)
+    ids = [orb.orbital_id for orb in orbitals]
+    assert len(ids) == len(set(ids)), "重复 orbital_id detected"
+    return [
+        {
+            "id": orb.orbital_id,
+            "display_name": orb.display_name,
+            "n": orb.n,
+            "l": orb.l,
+            "desc": orb.short_desc_zh,
+        }
+        for orb in orbitals
+    ]
+
+
 def get_orbital_by_display_name(name: str) -> Orbital:
     for orbital in list_orbitals(include_demo=True):
         if orbital.display_name == name:
+            return orbital
+    return ORBITALS[0]
+
+
+def get_orbital_by_id(orbital_id: str) -> Orbital:
+    for orbital in list_orbitals(include_demo=True):
+        if orbital.orbital_id == orbital_id:
             return orbital
     return ORBITALS[0]
 
