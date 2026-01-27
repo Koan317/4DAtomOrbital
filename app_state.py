@@ -4,6 +4,9 @@ from dataclasses import dataclass, field
 @dataclass
 class AppState:
     orbital_name: str = "1s(k=0)"
+    auto_extent: bool = True
+    extent: float = 6.0
+    strict_cancel_to_empty: bool = True
     angles: dict = field(
         default_factory=lambda: {
             "xy": 0,
@@ -39,6 +42,7 @@ class AppState:
         return (
             f"轨道={self.orbital_name}, 角度=[{self.angle_summary()}], "
             f"模式={self.projection_mode}, 等值={self.iso_percent}%, "
-            f"分辨率={self.resolution}, "
-            f"采样={self.integral_samples}, 自动精细化={self.auto_refine}"
+            f"范围={self.extent:.1f}, 分辨率={self.resolution}, "
+            f"采样={self.integral_samples}, 自动精细化={self.auto_refine}, "
+            f"自动范围={self.auto_extent}, 严格抵消为空={self.strict_cancel_to_empty}"
         )

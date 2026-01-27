@@ -407,6 +407,25 @@ def _extract_mesh(
     return (verts, faces), ""
 
 
+def _cancellation_metrics(vol: np.ndarray, tau: float = 0.02) -> dict:
+    if vol.size == 0:
+        return {"mean_abs": 0.0, "max_abs": 0.0, "frac_small": 1.0}
+    abs_vol = np.abs(vol)
+    max_abs = float(np.max(abs_vol))
+    mean_abs = float(np.mean(abs_vol))
+    frac_small = float(np.mean(abs_vol < (tau * max_abs))) if max_abs > 0 else 1.0
+    return {"mean_abs": mean_abs, "max_abs": max_abs, "frac_small": frac_small}
+
+
+def _is_cancellation_dominated(metrics: dict) -> bool:
+    max_abs = metrics["max_abs"]
+    mean_abs = metrics["mean_abs"]
+    frac_small = metrics["frac_small"]
+    if max_abs <= 0:
+        return True
+    return frac_small > 0.98 or mean_abs < 0.01 * max_abs
+
+
 class RenderWorker(QtCore.QObject):
     view_ready = QtCore.Signal(int, str, object, object, dict)
     log_line = QtCore.Signal(str)
@@ -464,6 +483,16 @@ class RenderWorker(QtCore.QObject):
             max_abs = max(abs(vol_min), abs(vol_max)) if vol.size else 0.0
             iso_value = (iso_percent / 100.0) * max_abs if iso_percent > 0 else 0.0
             is_non_negative_mode = mode.startswith("积分 |ψ|") or mode.startswith("最大 |ψ|")
+            strict_mode = mode.startswith("积分 ψ")
+            cancellation_metrics = _cancellation_metrics(vol) if strict_mode else None
+            cancellation_dominated = (
+                _is_cancellation_dominated(cancellation_metrics) if cancellation_metrics else False
+            )
+            strict_cancelled = (
+                strict_mode
+                and self._params.get("strict_cancel_to_empty", False)
+                and cancellation_dominated
+            )
 
             mesh_hit_pos = False
             mesh_hit_neg = False
@@ -482,7 +511,7 @@ class RenderWorker(QtCore.QObject):
                 view_id,
             )
 
-            if iso_value > 0 and vol.size:
+            if iso_value > 0 and vol.size and not strict_cancelled:
                 pos_key = _mesh_cache_key(volume_key, iso_value, 1)
                 neg_key = _mesh_cache_key(volume_key, iso_value, -1)
                 with self._cache_lock:
@@ -508,6 +537,9 @@ class RenderWorker(QtCore.QObject):
                             self._mesh_cache.set(neg_key, mesh_neg)
                     else:
                         mesh_neg_reason = "throttled"
+            elif strict_cancelled:
+                mesh_pos_reason = "strict-cancel"
+                mesh_neg_reason = "strict-cancel"
 
             view_time_ms = int((time.perf_counter() - view_start) * 1000)
             info = {
@@ -526,6 +558,8 @@ class RenderWorker(QtCore.QObject):
                 "max_abs": max_abs,
                 "mesh_pos_reason": mesh_pos_reason,
                 "mesh_neg_reason": mesh_neg_reason,
+                "strict_cancelled": strict_cancelled,
+                "cancellation_metrics": cancellation_metrics,
             }
             self.view_ready.emit(self._request_id, view_id, mesh_pos, mesh_neg, info)
 
@@ -690,7 +724,14 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self.state = AppState()
         self._ready = False
-        self._extent = 20.0
+        self._extent_base = 6.0
+        self._extent_step = 2.0
+        self._extent_min = 6.0
+        self._extent_max = 20.0
+        self._dx_target = 0.25
+        self._allowed_resolutions = [64, 96, 128, 160]
+        self._extent = self._compute_auto_extent(self._current_orbital_n())
+        self.state.extent = self._extent
         self._last_mesh_time = 0.0
         self._mesh_throttle_s = 0.3
         self._render_timer = QtCore.QTimer(self)
@@ -850,6 +891,21 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         self.projection_mode.currentTextChanged.connect(self.on_ui_changed)
 
+        self.auto_extent = QtWidgets.QCheckBox("自动范围 (Auto Extent)")
+        self.auto_extent.setChecked(True)
+        self.auto_extent.toggled.connect(self._on_auto_extent_toggled)
+
+        self.extent_slider = QtWidgets.QSlider(QtCore.Qt.Orientation.Horizontal)
+        self.extent_slider.setRange(int(self._extent_min * 10), int(self._extent_max * 10))
+        self.extent_slider.setValue(int(self._extent * 10))
+        self.extent_slider.valueChanged.connect(self._on_extent_changed)
+        self.extent_slider.sliderReleased.connect(self._on_extent_released)
+        self.extent_value = QtWidgets.QLabel(f"{self._extent:.1f}")
+
+        self.strict_cancel = QtWidgets.QCheckBox("严格抵消为空 (Strict-cancel-to-empty)")
+        self.strict_cancel.setChecked(True)
+        self.strict_cancel.toggled.connect(self._on_strict_cancel_toggled)
+
         self.isosurface_slider = QtWidgets.QSlider(QtCore.Qt.Orientation.Horizontal)
         self.isosurface_slider.setRange(0, 100)
         self.isosurface_slider.setValue(0)
@@ -858,7 +914,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.isosurface_slider.sliderReleased.connect(self._on_isosurface_released)
 
         self.resolution_combo = QtWidgets.QComboBox()
-        self.resolution_combo.addItems(["64", "96", "128"])
+        self.resolution_combo.addItems([str(val) for val in self._allowed_resolutions])
         self.resolution_combo.currentTextChanged.connect(self.on_ui_changed)
 
         self.samples_combo = QtWidgets.QComboBox()
@@ -896,6 +952,16 @@ class MainWindow(QtWidgets.QMainWindow):
 
         layout.addWidget(QtWidgets.QLabel("投影模式"))
         layout.addWidget(self.projection_mode)
+
+        layout.addWidget(self.auto_extent)
+        extent_layout = QtWidgets.QHBoxLayout()
+        extent_layout.addWidget(QtWidgets.QLabel("范围 L"))
+        extent_layout.addStretch(1)
+        extent_layout.addWidget(self.extent_value)
+        layout.addLayout(extent_layout)
+        layout.addWidget(self.extent_slider)
+
+        layout.addWidget(self.strict_cancel)
 
         iso_layout = QtWidgets.QHBoxLayout()
         iso_layout.addWidget(QtWidgets.QLabel("等值面级别"))
@@ -946,6 +1012,24 @@ class MainWindow(QtWidgets.QMainWindow):
     def _on_isosurface_released(self) -> None:
         self._handle_slider_released("iso")
 
+    def _on_auto_extent_toggled(self, checked: bool) -> None:
+        self.state.auto_extent = checked
+        self._refresh_extent_settings()
+        self._handle_value_change("volume")
+
+    def _on_extent_changed(self, value: int) -> None:
+        extent = value / 10.0
+        self.extent_value.setText(f"{extent:.1f}")
+        self.state.extent = extent
+        self._handle_value_change("volume")
+
+    def _on_extent_released(self) -> None:
+        self._handle_slider_released("volume")
+
+    def _on_strict_cancel_toggled(self, checked: bool) -> None:
+        self.state.strict_cancel_to_empty = checked
+        self._handle_value_change("iso")
+
     def _reset_angles(self) -> None:
         for name, widgets in self.angle_controls.items():
             widgets["slider"].blockSignals(True)
@@ -985,9 +1069,14 @@ class MainWindow(QtWidgets.QMainWindow):
         self.state.auto_refine = self.auto_refine.isChecked()
         self.state.preview_quality = self.preview_quality_combo.currentText()
         self.state.final_quality = self.final_quality_combo.currentText()
+        self.state.auto_extent = self.auto_extent.isChecked()
+        self.state.strict_cancel_to_empty = self.strict_cancel.isChecked()
 
         if self.orbital_list.currentItem() is not None:
             self.state.orbital_name = self.orbital_list.currentItem().text()
+
+        self._refresh_extent_settings()
+        self._sync_strict_cancel_control()
 
         if (
             not self.state.projection_mode.startswith("切片")
@@ -1026,13 +1115,18 @@ class MainWindow(QtWidgets.QMainWindow):
             "angles",
             "resolution",
             "integral_samples",
+            "extent",
+            "auto_extent",
             "preview_quality",
             "final_quality",
             "auto_refine",
         ]
         if changed(volume_keys):
             return "volume"
-        if previous["iso_percent"] != current["iso_percent"]:
+        if (
+            previous["iso_percent"] != current["iso_percent"]
+            or previous["strict_cancel_to_empty"] != current["strict_cancel_to_empty"]
+        ):
             return "iso"
         return "none"
 
@@ -1044,9 +1138,12 @@ class MainWindow(QtWidgets.QMainWindow):
             "resolution": self.state.resolution,
             "integral_samples": self.state.integral_samples,
             "iso_percent": self.state.iso_percent,
+            "extent": self.state.extent,
+            "auto_extent": self.state.auto_extent,
             "preview_quality": self.state.preview_quality,
             "final_quality": self.state.final_quality,
             "auto_refine": self.state.auto_refine,
+            "strict_cancel_to_empty": self.state.strict_cancel_to_empty,
         }
 
     def _handle_value_change(self, change_kind: str) -> None:
@@ -1077,15 +1174,17 @@ class MainWindow(QtWidgets.QMainWindow):
                 "快速（N=64，采样=32）": (64, 32),
                 "中等（N=96，采样=64）": (96, 64),
             }
-            return mapping[current]
+            resolution, samples = mapping[current]
+            return self._apply_extent_resolution(resolution), samples
         if quality_label == "最终":
             current = self.final_quality_combo.currentText()
             mapping = {
                 "高（N=128，采样=128）": (128, 128),
                 "超高（N=160，采样=256）": (160, 256),
             }
-            return mapping[current]
-        return self.state.resolution, self.state.integral_samples
+            resolution, samples = mapping[current]
+            return self._apply_extent_resolution(resolution), samples
+        return self._apply_extent_resolution(self.state.resolution), self.state.integral_samples
 
     def _schedule_render(self, quality_label: str) -> None:
         self._pending_quality_label = quality_label
@@ -1132,15 +1231,52 @@ class MainWindow(QtWidgets.QMainWindow):
         for view_id, vol in volume_hits.items():
             max_abs = float(np.max(np.abs(vol))) if vol.size else 0.0
             iso_value = (iso_percent / 100.0) * max_abs if iso_percent > 0 else 0.0
-            if iso_value > 0:
-                mesh_pos, _ = _extract_mesh(vol, iso_value, extent)
-                if mode.startswith("积分 |ψ|") or mode.startswith("最大 |ψ|"):
-                    mesh_neg = None
-                else:
-                    mesh_neg, _ = _extract_mesh(vol, -iso_value, extent)
-            else:
+            cancellation_metrics = _cancellation_metrics(vol) if mode.startswith("积分 ψ") else None
+            cancellation_dominated = (
+                _is_cancellation_dominated(cancellation_metrics) if cancellation_metrics else False
+            )
+            strict_cancelled = (
+                mode.startswith("积分 ψ")
+                and self.state.strict_cancel_to_empty
+                and cancellation_dominated
+            )
+            if strict_cancelled:
                 mesh_pos = None
                 mesh_neg = None
+                self.log_panel.appendPlainText(
+                    "View {view}: strict cancellation -> empty (mean_abs={mean:.3e}, "
+                    "max_abs={max:.3e}, frac_small={frac:.3f})".format(
+                        view=view_id,
+                        mean=cancellation_metrics["mean_abs"],
+                        max=cancellation_metrics["max_abs"],
+                        frac=cancellation_metrics["frac_small"],
+                    )
+                )
+            else:
+                if iso_value > 0:
+                    mesh_pos, _ = _extract_mesh(vol, iso_value, extent)
+                    if mode.startswith("积分 |ψ|") or mode.startswith("最大 |ψ|"):
+                        mesh_neg = None
+                    else:
+                        mesh_neg, _ = _extract_mesh(vol, -iso_value, extent)
+                else:
+                    mesh_pos = None
+                    mesh_neg = None
+            if (
+                mode.startswith("积分 ψ")
+                and not self.state.strict_cancel_to_empty
+                and cancellation_metrics is not None
+                and cancellation_dominated
+            ):
+                self.log_panel.appendPlainText(
+                    "View {view}: cancellation-dominated, fragments likely "
+                    "(mean_abs={mean:.3e}, max_abs={max:.3e}, frac_small={frac:.3f})".format(
+                        view=view_id,
+                        mean=cancellation_metrics["mean_abs"],
+                        max=cancellation_metrics["max_abs"],
+                        frac=cancellation_metrics["frac_small"],
+                    )
+                )
             self.projection_views[view_id].set_meshes(mesh_pos, mesh_neg, 1.0)
         self.log_panel.appendPlainText("等值面仅网格更新（预览）")
 
@@ -1169,6 +1305,7 @@ class MainWindow(QtWidgets.QMainWindow):
         request_id = self._render_request_id
         self._active_request_id = request_id
         self._cancel_event = threading.Event()
+        self._clear_views()
 
         orbital = get_orbital_by_display_name(self.state.orbital_name)
         allow_mesh = True
@@ -1192,6 +1329,7 @@ class MainWindow(QtWidgets.QMainWindow):
             "extent": self._extent,
             "quality_label": quality_label,
             "allow_mesh": allow_mesh,
+            "strict_cancel_to_empty": self.state.strict_cancel_to_empty,
         }
 
         reason_map = {
@@ -1250,7 +1388,10 @@ class MainWindow(QtWidgets.QMainWindow):
 
         mesh_pos_data = mesh_pos if isinstance(mesh_pos, tuple) else None
         mesh_neg_data = mesh_neg if isinstance(mesh_neg, tuple) else None
-        self.projection_views[view_id].set_meshes(mesh_pos_data, mesh_neg_data, 1.0)
+        if info.get("strict_cancelled"):
+            self.projection_views[view_id].set_meshes(None, None, 1.0)
+        else:
+            self.projection_views[view_id].set_meshes(mesh_pos_data, mesh_neg_data, 1.0)
 
         self.log_panel.appendPlainText(
             "视图 {view} 体积：缓存 {vol}".format(
@@ -1258,7 +1399,25 @@ class MainWindow(QtWidgets.QMainWindow):
                 vol="命中" if info["volume_hit"] else "未命中",
             )
         )
-        if info["iso_value"] <= 0:
+        if info.get("strict_cancelled"):
+            metrics = info.get("cancellation_metrics") or {"mean_abs": 0.0, "max_abs": 0.0, "frac_small": 1.0}
+            self.log_panel.appendPlainText(
+                "View {view}: strict cancellation -> empty (mean_abs={mean:.3e}, "
+                "max_abs={max:.3e}, frac_small={frac:.3f})".format(
+                    view=view_id,
+                    mean=metrics["mean_abs"],
+                    max=metrics["max_abs"],
+                    frac=metrics["frac_small"],
+                )
+            )
+            self.status_bar.showMessage(
+                "模式={mode} | 质量={quality} | View {view} 严格抵消为空".format(
+                    mode=info["mode"],
+                    quality=quality_label,
+                    view=view_id,
+                )
+            )
+        elif info["iso_value"] <= 0:
             self.log_panel.appendPlainText(f"视图 {view_id} 网格：跳过（iso=0）")
         else:
             if mesh_pos_data is None:
@@ -1291,6 +1450,23 @@ class MainWindow(QtWidgets.QMainWindow):
                     "视图 {view} 网格：缓存 {mesh}".format(
                         view=view_id,
                         mesh="命中" if (info["mesh_hit_pos"] and info["mesh_hit_neg"]) else "未命中",
+                    )
+                )
+        if (
+            info.get("cancellation_metrics")
+            and info.get("mode", "").startswith("积分 ψ")
+            and not info.get("strict_cancelled")
+            and not self.state.strict_cancel_to_empty
+        ):
+            metrics = info["cancellation_metrics"]
+            if _is_cancellation_dominated(metrics):
+                self.log_panel.appendPlainText(
+                    "View {view}: cancellation-dominated, fragments likely "
+                    "(mean_abs={mean:.3e}, max_abs={max:.3e}, frac_small={frac:.3f})".format(
+                        view=view_id,
+                        mean=metrics["mean_abs"],
+                        max=metrics["max_abs"],
+                        frac=metrics["frac_small"],
                     )
                 )
         self.log_panel.appendPlainText(
@@ -1344,3 +1520,48 @@ class MainWindow(QtWidgets.QMainWindow):
         self.status_bar.showMessage(
             f"模式={mode} | 质量={quality_label} | 计算中... ({view_index}/4) | {cache_text}"
         )
+
+    def _current_orbital_n(self) -> int:
+        orbital = get_orbital_by_display_name(self.state.orbital_name)
+        return orbital.n
+
+    def _compute_auto_extent(self, n: int) -> float:
+        return self._extent_base + self._extent_step * max(n - 1, 0)
+
+    def _snap_resolution(self, target: int) -> int:
+        return min(self._allowed_resolutions, key=lambda res: abs(res - target))
+
+    def _apply_extent_resolution(self, base_resolution: int) -> int:
+        if not self.state.auto_extent:
+            return base_resolution
+        target = int(round((2 * self._extent) / self._dx_target))
+        snapped = self._snap_resolution(target)
+        return max(base_resolution, snapped)
+
+    def _refresh_extent_settings(self) -> None:
+        if self.state.auto_extent:
+            extent = self._compute_auto_extent(self._current_orbital_n())
+            self._extent = extent
+            self.state.extent = extent
+            self.extent_slider.blockSignals(True)
+            self.extent_slider.setValue(int(extent * 10))
+            self.extent_slider.blockSignals(False)
+            self.extent_value.setText(f"{extent:.1f}")
+            self.extent_slider.setEnabled(False)
+        else:
+            extent = max(self._extent_min, min(self.state.extent, self._extent_max))
+            self._extent = extent
+            self.state.extent = extent
+            self.extent_slider.setEnabled(True)
+            self.extent_slider.blockSignals(True)
+            self.extent_slider.setValue(int(extent * 10))
+            self.extent_slider.blockSignals(False)
+            self.extent_value.setText(f"{extent:.1f}")
+
+    def _sync_strict_cancel_control(self) -> None:
+        enabled = self.state.projection_mode.startswith("积分 ψ")
+        self.strict_cancel.setEnabled(enabled)
+
+    def _clear_views(self) -> None:
+        for view in self.projection_views.values():
+            view.set_meshes(None, None, 1.0)
