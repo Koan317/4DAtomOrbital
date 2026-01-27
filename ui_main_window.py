@@ -7,26 +7,61 @@ from collections import OrderedDict
 from concurrent.futures import ProcessPoolExecutor, as_completed
 import numpy as np
 from numba import njit, prange
-from PySide6 import QtCore, QtGui, QtWidgets
-from shiboken6 import isValid
+try:
+    from PySide6 import QtCore, QtGui, QtWidgets
+    from shiboken6 import isValid
+    _QT_AVAILABLE = True
+except ImportError:  # pragma: no cover - used for headless selftest
+    class _DummySignal:
+        def __init__(self, *_args: object, **_kwargs: object) -> None:
+            pass
+
+        def emit(self, *_args: object, **_kwargs: object) -> None:
+            return None
+
+    class _DummyQtCore:
+        Signal = _DummySignal
+
+        class QObject:  # noqa: D401 - minimal stub
+            """Placeholder QObject for headless selftest."""
+
+    class _DummyQtWidgets:
+        def __getattr__(self, _name: str) -> type:
+            return object
+
+    class _DummyQtGui:
+        def __getattr__(self, _name: str) -> type:
+            return object
+
+    QtCore = _DummyQtCore()
+    QtGui = _DummyQtGui()
+    QtWidgets = _DummyQtWidgets()
+    _QT_AVAILABLE = False
+
+    def isValid(*_args: object, **_kwargs: object) -> bool:
+        return False
+
 from skimage import measure
 
-from app_state import AppState
-from orbitals import DEMO_ORBITAL, get_orbital_by_display_name, list_orbitals, run_orbital_self_check
-from ui_widgets import ProjectionViewWidget, build_labeled_slider, build_title_label
+from app_state import AppState, MODE_KEY_MAP, mode_key_from_ui_label
+from orbitals import (
+    DEMO_ORBITAL,
+    get_orbital_by_id,
+    get_orbital_manifest,
+    list_orbitals,
+    run_orbital_self_check,
+)
+if _QT_AVAILABLE:
+    from ui_widgets import ProjectionViewWidget, build_labeled_slider, build_title_label
+else:  # pragma: no cover - headless selftest
+    ProjectionViewWidget = None
+    build_labeled_slider = None
+    build_title_label = None
 
 
 ISO_PERCENT_FIXED = 3.0
 STRICT_PRECHECK_SAMPLES = 8
-STRICT_CANCEL_TAU = 0.02
 STRICT_ISO_ABS_FLOOR = 1e-3
-
-MODE_KEY_MAP = {
-    "切片（快速）": "slice",
-    "积分 ψ（严格）": "integral_strict",
-    "积分 |ψ|（稳定）": "integral_abs",
-    "最大 |ψ|（可视化）": "max_abs",
-}
 
 EXTENT_TABLE = {
     ("1s(k=0)", "slice"): 10.0,
@@ -141,9 +176,19 @@ EXTENT_TABLE = {
     ("7i(k=6)", "integral_strict"): 30.0,
     ("7i(k=6)", "integral_abs"): 30.0,
     ("7i(k=6)", "max_abs"): 30.0,
+    ("演示/假场 (Debug)", "slice"): 10.0,
+    ("演示/假场 (Debug)", "integral_strict"): 10.0,
+    ("演示/假场 (Debug)", "integral_abs"): 10.0,
+    ("演示/假场 (Debug)", "max_abs"): 10.0,
 }
 
 _EXTENT_TABLE_PATH = "extent_table.json"
+
+
+def _log_event(event: str, **fields: object) -> str:
+    parts = [f"{key}={value}" for key, value in fields.items()]
+    suffix = ", ".join(parts)
+    return f"{event}: {suffix}" if suffix else event
 
 
 class LRUCache:
@@ -340,7 +385,7 @@ def _compute_integral_volume_task(
     extent: float,
     rotation: np.ndarray,
     samples: int,
-    mode: str,
+    mode_key: str,
     orbital_id: str,
 ) -> tuple[str, np.ndarray]:
     coords = np.linspace(-extent, extent, resolution, dtype=np.float64)
@@ -349,12 +394,7 @@ def _compute_integral_volume_task(
     weights = weights * extent
     view_axis = _VIEW_AXIS[view_id]
     orbital_index = _ORBITAL_INDEX.get(orbital_id, 0)
-    if mode.startswith("积分 ψ"):
-        mode_flag = 0
-    elif mode.startswith("积分 |ψ|"):
-        mode_flag = 1
-    else:
-        mode_flag = 2
+    mode_flag = 0 if mode_key == "integral_strict" else 1 if mode_key == "integral_abs" else 2
     volume = _integral_volume_kernel(
         view_axis,
         coords,
@@ -369,7 +409,7 @@ def _compute_integral_volume_task(
 
 def _volume_cache_key(
     orbital_id: str,
-    projection_mode: str,
+    mode_key: str,
     angles: dict,
     resolution: int,
     samples: int,
@@ -377,8 +417,8 @@ def _volume_cache_key(
     view_id: str,
 ) -> tuple:
     angle_tuple = tuple(angles[name] for name in ["xy", "xz", "xw", "yz", "yw", "zw"])
-    sample_value = samples if not projection_mode.startswith("切片") else 0
-    return (orbital_id, projection_mode, angle_tuple, resolution, sample_value, extent, view_id)
+    sample_value = samples if mode_key != "slice" else 0
+    return (orbital_id, mode_key, angle_tuple, resolution, sample_value, extent, view_id)
 
 
 def _mesh_cache_key(volume_key: tuple, iso_value: float, sign: int) -> tuple:
@@ -401,7 +441,7 @@ def _generate_slice_volume(
     resolution: int,
     extent: float,
     rotation: np.ndarray,
-    orbital_name: str,
+    orbital_id: str,
 ) -> np.ndarray:
     coords = np.linspace(-extent, extent, resolution)
     grid_a, grid_b, grid_c = np.meshgrid(coords, coords, coords, indexing="ij")
@@ -428,7 +468,7 @@ def _generate_slice_volume(
     zr = rotated[2].reshape(z.shape)
     wr = rotated[3].reshape(w.shape)
 
-    orbital = get_orbital_by_display_name(orbital_name)
+    orbital = get_orbital_by_id(orbital_id)
     return orbital.evaluate(xr, yr, zr, wr)
 
 
@@ -438,8 +478,8 @@ def _generate_integral_volume(
     extent: float,
     rotation: np.ndarray,
     samples: int,
-    mode: str,
-    orbital_name: str,
+    mode_key: str,
+    orbital_id: str,
     cancel_event: threading.Event | None = None,
 ) -> np.ndarray | None:
     rotation = np.ascontiguousarray(rotation, dtype=np.float64)
@@ -474,7 +514,7 @@ def _generate_integral_volume(
         x_flat, y_flat, z_flat = x.reshape(-1), y.reshape(-1), z.reshape(-1)
 
     accumulator = np.zeros_like(grid_flat, dtype=np.float64)
-    orbital = get_orbital_by_display_name(orbital_name)
+    orbital = get_orbital_by_id(orbital_id)
 
     for t_value, weight in zip(nodes, weights):
         if cancel_event is not None and cancel_event.is_set():
@@ -502,9 +542,9 @@ def _generate_integral_volume(
         wr = p0 * rotation[3, 0] + p1 * rotation[3, 1] + p2 * rotation[3, 2] + p3 * rotation[3, 3]
         psi = orbital.evaluate(xr, yr, zr, wr)
 
-        if mode.startswith("积分 ψ"):
+        if mode_key == "integral_strict":
             accumulator += psi * weight
-        elif mode.startswith("积分 |ψ|"):
+        elif mode_key == "integral_abs":
             accumulator += np.abs(psi) * weight
         else:
             accumulator = np.maximum(accumulator, np.abs(psi))
@@ -539,23 +579,13 @@ def _extract_mesh(
     return (verts, faces), ""
 
 
-def _cancellation_metrics(vol: np.ndarray, tau: float = STRICT_CANCEL_TAU) -> dict:
-    if vol.size == 0:
-        return {"mean_abs": 0.0, "max_abs": 0.0, "frac_small": 1.0}
-    abs_vol = np.abs(vol)
-    max_abs = float(np.max(abs_vol))
-    mean_abs = float(np.mean(abs_vol))
-    frac_small = float(np.mean(abs_vol < (tau * max_abs))) if max_abs > 0 else 1.0
-    return {"mean_abs": mean_abs, "max_abs": max_abs, "frac_small": frac_small}
-
-
 def _precheck_strict_integral(
     view_id: str,
     resolution: int,
     extent: float,
     rotation: np.ndarray,
     orbital_id: str,
-) -> tuple[np.ndarray, dict]:
+) -> float:
     coords = np.linspace(-extent, extent, resolution, dtype=np.float64)
     nodes, weights = np.polynomial.legendre.leggauss(STRICT_PRECHECK_SAMPLES)
     nodes = nodes * extent
@@ -571,12 +601,9 @@ def _precheck_strict_integral(
         orbital_index,
         0,
     )
-    metrics = _cancellation_metrics(vol_pre)
-    return vol_pre, metrics
-
-
-def _mode_key_from_label(mode_label: str) -> str:
-    return MODE_KEY_MAP.get(mode_label, "slice")
+    if vol_pre.size == 0:
+        return 0.0
+    return float(np.max(np.abs(vol_pre)))
 
 
 def _boundary_max_abs(vol: np.ndarray) -> float:
@@ -669,7 +696,7 @@ def calibrate_extents(
                 for _ in range(max_iter):
                     if mode_key == "slice":
                         vols = [
-                            _generate_slice_volume(view_id, n_pre, extent, rotation, orb.display_name)
+                            _generate_slice_volume(view_id, n_pre, extent, rotation, orb.orbital_id)
                             for view_id in ["X", "Y", "Z", "W"]
                         ]
                     else:
@@ -702,6 +729,94 @@ def calibrate_extents(
     return table
 
 
+def run_selftest() -> int:
+    loaded, _ = _load_extent_table()
+    if loaded is not None:
+        EXTENT_TABLE.clear()
+        EXTENT_TABLE.update(loaded)
+
+    manifest = get_orbital_manifest(include_demo=True)
+    mode_keys = list(MODE_KEY_MAP.values())
+    view_ids = ["X", "Y", "Z", "W"]
+    rotation = np.eye(4, dtype=np.float64)
+    resolution = 16
+    samples = 8
+    nodes, weights = np.polynomial.legendre.leggauss(samples)
+    errors: list[str] = []
+    total_cases = 0
+
+    for entry in manifest:
+        orbital_id = entry["id"]
+        for mode_key in mode_keys:
+            extent = EXTENT_TABLE.get((orbital_id, mode_key))
+            if extent is None:
+                errors.append(f"missing extent_table entry: {orbital_id}|{mode_key}")
+                continue
+            coords = np.linspace(-extent, extent, resolution, dtype=np.float64)
+            for view_id in view_ids:
+                total_cases += 1
+                strict_empty = False
+                if mode_key == "slice":
+                    vol = _generate_slice_volume(view_id, resolution, extent, rotation, orbital_id)
+                elif mode_key == "integral_strict":
+                    max_abs_pre = _precheck_strict_integral(
+                        view_id, resolution, extent, rotation, orbital_id
+                    )
+                    iso_pre = (ISO_PERCENT_FIXED / 100.0) * max_abs_pre
+                    if max_abs_pre <= 0 or iso_pre < STRICT_ISO_ABS_FLOOR:
+                        vol = np.array([])
+                        strict_empty = True
+                    else:
+                        vol = _integral_volume_kernel(
+                            _VIEW_AXIS[view_id],
+                            coords,
+                            nodes * extent,
+                            weights * extent,
+                            rotation,
+                            _ORBITAL_INDEX.get(orbital_id, 0),
+                            0,
+                        )
+                else:
+                    mode_flag = 1 if mode_key == "integral_abs" else 2
+                    vol = _integral_volume_kernel(
+                        _VIEW_AXIS[view_id],
+                        coords,
+                        nodes * extent,
+                        weights * extent,
+                        rotation,
+                        _ORBITAL_INDEX.get(orbital_id, 0),
+                        mode_flag,
+                    )
+
+                if vol.size and not np.isfinite(vol).all():
+                    errors.append(f"non-finite volume: {orbital_id}|{mode_key}|{view_id}")
+                    continue
+
+                max_abs = float(np.max(np.abs(vol))) if vol.size else 0.0
+                iso_value = (ISO_PERCENT_FIXED / 100.0) * max_abs if max_abs > 0 else 0.0
+                mesh_pos = None
+                mesh_neg = None
+                if iso_value > 0 and vol.size:
+                    mesh_pos, _ = _extract_mesh(vol, iso_value, extent)
+                    if mode_key in {"slice", "integral_strict"}:
+                        mesh_neg, _ = _extract_mesh(vol, -iso_value, extent)
+                has_mesh = (mesh_pos is not None) or (mesh_neg is not None)
+                overlay_visible = not has_mesh
+                if not has_mesh and not overlay_visible:
+                    errors.append(f"overlay mismatch: {orbital_id}|{mode_key}|{view_id}")
+                if strict_empty and has_mesh:
+                    errors.append(f"strict-empty produced mesh: {orbital_id}|{mode_key}|{view_id}")
+                if mode_key in {"integral_abs", "max_abs"} and mesh_neg is not None:
+                    errors.append(f"negative mesh present for non-negative mode: {orbital_id}|{mode_key}|{view_id}")
+
+    print(f"selftest: cases={total_cases}, errors={len(errors)}")
+    if errors:
+        for err in errors[:10]:
+            print(f"selftest_error: {err}")
+        return 1
+    return 0
+
+
 class RenderWorker(QtCore.QObject):
     view_ready = QtCore.Signal(int, str, object, object, dict)
     log_line = QtCore.Signal(str)
@@ -726,7 +841,8 @@ class RenderWorker(QtCore.QObject):
 
     def run(self) -> None:
         start_total = time.perf_counter()
-        mode = self._params["projection_mode"]
+        mode_label = self._params["mode_label"]
+        mode_key = self._params["mode_key"]
         quality_label = self._params["quality_label"]
         resolution = self._params["resolution"]
         samples = self._params["samples"]
@@ -735,15 +851,7 @@ class RenderWorker(QtCore.QObject):
         orbital_id = self._params["orbital_id"]
         allow_mesh = self._params.get("allow_mesh", True)
 
-        self.log_line.emit(
-            "渲染#{rid} 开始（{quality}）：模式={mode}, N={res}, M={samples}".format(
-                rid=self._request_id,
-                quality=quality_label,
-                mode=mode,
-                res=resolution,
-                samples=samples,
-            )
-        )
+        # Logging intentionally minimal; strict-empty decisions are logged separately.
 
         rotation = _compose_rotation_matrix_from_angles(self._params["angles"])
         rotation = np.ascontiguousarray(rotation, dtype=np.float64)
@@ -758,8 +866,8 @@ class RenderWorker(QtCore.QObject):
             vol_max = float(np.max(vol)) if vol.size else 0.0
             max_abs = max(abs(vol_min), abs(vol_max)) if vol.size else 0.0
             iso_value = (iso_percent / 100.0) * max_abs if iso_percent > 0 else 0.0
-            is_non_negative_mode = mode.startswith("积分 |ψ|") or mode.startswith("最大 |ψ|")
-            strict_mode = mode.startswith("积分 ψ")
+            is_non_negative_mode = mode_key in {"integral_abs", "max_abs"}
+            strict_mode = mode_key == "integral_strict"
             strict_empty_info = strict_early_empty_info.get(view_id)
             strict_cancelled = strict_mode and strict_empty_info is not None
             strict_empty_reason = strict_empty_info.get("reason") if strict_empty_info else ""
@@ -773,7 +881,7 @@ class RenderWorker(QtCore.QObject):
 
             volume_key = _volume_cache_key(
                 orbital_id,
-                mode,
+                mode_key,
                 self._params["angles"],
                 resolution,
                 samples,
@@ -827,7 +935,8 @@ class RenderWorker(QtCore.QObject):
                 "mesh_hit_neg": mesh_hit_neg,
                 "view_time_ms": view_time_ms,
                 "quality_label": quality_label,
-                "mode": mode,
+                "mode_label": mode_label,
+                "mode_key": mode_key,
                 "resolution": resolution,
                 "samples": samples,
                 "iso_value": iso_value,
@@ -846,13 +955,13 @@ class RenderWorker(QtCore.QObject):
 
         strict_early_empty_info: dict[str, dict] = {}
 
-        if mode.startswith("切片"):
+        if mode_key == "slice":
             for view_id in view_ids:
                 if self._cancel_event.is_set():
                     break
                 volume_key = _volume_cache_key(
                     orbital_id,
-                    mode,
+                    mode_key,
                     self._params["angles"],
                     resolution,
                     samples,
@@ -869,7 +978,7 @@ class RenderWorker(QtCore.QObject):
                         resolution,
                         extent,
                         rotation,
-                        self._params["orbital_name"],
+                        orbital_id,
                     )
                     if vol.size and not np.isfinite(vol).all():
                         vol = np.array([])
@@ -884,7 +993,7 @@ class RenderWorker(QtCore.QObject):
                         break
                     volume_key = _volume_cache_key(
                         orbital_id,
-                        mode,
+                        mode_key,
                         self._params["angles"],
                         resolution,
                         samples,
@@ -896,15 +1005,14 @@ class RenderWorker(QtCore.QObject):
                     if volume_hit:
                         handle_volume(view_id, cached_vol, True)
                         continue
-                    if mode.startswith("积分 ψ"):
-                        vol_pre, metrics = _precheck_strict_integral(
+                    if mode_key == "integral_strict":
+                        max_abs_pre = _precheck_strict_integral(
                             view_id,
                             resolution,
                             extent,
                             rotation,
                             orbital_id,
                         )
-                        max_abs_pre = metrics["max_abs"]
                         iso_pre = (ISO_PERCENT_FIXED / 100.0) * max_abs_pre
                         if max_abs_pre <= 0 or iso_pre < STRICT_ISO_ABS_FLOOR:
                             strict_early_empty_info[view_id] = {
@@ -914,12 +1022,15 @@ class RenderWorker(QtCore.QObject):
                                 "reason": "strict-empty-floor",
                             }
                             self.log_line.emit(
-                                "View {view}: strict empty -> empty (max_abs_pre={max:.3e}, "
-                                "iso_pre={iso:.3e}, extent={extent:.1f})".format(
-                                    view=view_id,
-                                    max=max_abs_pre,
-                                    iso=iso_pre,
-                                    extent=extent,
+                                _log_event(
+                                    "strict_empty",
+                                    orbital_id=orbital_id,
+                                    mode_key=mode_key,
+                                    view_id=view_id,
+                                    extent=round(extent, 2),
+                                    max_abs_pre=f"{max_abs_pre:.3e}",
+                                    iso_pre=f"{iso_pre:.3e}",
+                                    floor=f"{STRICT_ISO_ABS_FLOOR:.3e}",
                                 )
                             )
                             empty_vol = np.array([])
@@ -934,7 +1045,7 @@ class RenderWorker(QtCore.QObject):
                         extent,
                         rotation,
                         samples,
-                        mode,
+                        mode_key,
                         orbital_id,
                     )
                     futures[future] = volume_key
@@ -953,8 +1064,7 @@ class RenderWorker(QtCore.QObject):
                         self._volume_cache.set(volume_key, vol)
                     handle_volume(view_id, vol, False)
 
-        total_ms = int((time.perf_counter() - start_total) * 1000)
-        self.log_line.emit(f"渲染#{self._request_id} 完成，用时 {total_ms} ms")
+        _ = start_total
         self.finished.emit(self._request_id)
 
 
@@ -1074,22 +1184,16 @@ class MainWindow(QtWidgets.QMainWindow):
     def _run_orbital_self_check(self) -> None:
         warnings = run_orbital_self_check()
         if not warnings:
-            self.log_panel.appendPlainText("轨道自检：通过")
             return
         for warning in warnings:
-            self.log_panel.appendPlainText(f"轨道自检警告：{warning}")
+            self._append_log(_log_event("orbital_self_check_warning", detail=warning))
 
     def _load_extent_table(self) -> None:
         loaded, status = _load_extent_table()
         if loaded is None:
-            if status == "iso_mismatch":
-                self.log_panel.appendPlainText("范围表：iso_percent 不匹配，忽略 extent_table.json")
-            else:
-                self.log_panel.appendPlainText("范围表：未找到或无效，使用内置表")
             return
         EXTENT_TABLE.clear()
         EXTENT_TABLE.update(loaded)
-        self.log_panel.appendPlainText("范围表：已从 extent_table.json 载入")
 
     def _build_status_bar(self) -> None:
         self.status_bar = QtWidgets.QStatusBar()
@@ -1130,11 +1234,16 @@ class MainWindow(QtWidgets.QMainWindow):
         layout.addWidget(build_title_label("轨道"))
 
         self.orbital_list = QtWidgets.QListWidget()
-        for orb in list_orbitals():
-            item = QtWidgets.QListWidgetItem(orb.display_name)
-            if orb.description:
-                item.setToolTip(orb.description)
+        manifest = get_orbital_manifest(include_demo=True)
+        for entry in manifest:
+            item = QtWidgets.QListWidgetItem(entry["display_name"])
+            item.setData(QtCore.Qt.ItemDataRole.UserRole, entry["id"])
+            if entry["desc"]:
+                item.setToolTip(entry["desc"])
             self.orbital_list.addItem(item)
+        assert [self.orbital_list.item(i).text() for i in range(self.orbital_list.count())] == [
+            entry["display_name"] for entry in manifest
+        ], "轨道清单顺序与左侧列表不一致"
         self.orbital_list.setCurrentRow(0)
         self.orbital_list.currentTextChanged.connect(self._on_orbital_changed)
         layout.addWidget(self.orbital_list, 1)
@@ -1283,7 +1392,22 @@ class MainWindow(QtWidgets.QMainWindow):
         self._handle_slider_released("angles")
 
     def _on_orbital_changed(self, text: str) -> None:
-        self.state.orbital_name = text
+        item = self.orbital_list.currentItem()
+        if item is not None:
+            orbital_id = item.data(QtCore.Qt.ItemDataRole.UserRole)
+            self.state.orbital_id = orbital_id
+            self.state.orbital_display_name = text
+            orbital = get_orbital_by_id(orbital_id)
+            mode_key = self.state.projection_mode_key
+            self._append_log(
+                _log_event(
+                    "orbital_selected",
+                    id=orbital.orbital_id,
+                    n=orbital.n,
+                    l=orbital.l,
+                    mode=mode_key,
+                )
+            )
         self.on_ui_changed()
 
     def _reset_angles(self) -> None:
@@ -1317,15 +1441,18 @@ class MainWindow(QtWidgets.QMainWindow):
             return
 
         self.state.projection_mode = self.projection_mode.currentText()
+        self.state.projection_mode_key = mode_key_from_ui_label(self.state.projection_mode)
         self.state.resolution = int(self.resolution_combo.currentText())
         self.state.integral_samples = int(self.samples_combo.currentText())
         self.state.preview_quality = self.preview_quality_combo.currentText()
         self.state.final_quality = self.final_quality_combo.currentText()
         if self.orbital_list.currentItem() is not None:
-            self.state.orbital_name = self.orbital_list.currentItem().text()
+            self.state.orbital_display_name = self.orbital_list.currentItem().text()
+            self.state.orbital_id = self.orbital_list.currentItem().data(
+                QtCore.Qt.ItemDataRole.UserRole
+            )
 
         self.status_bar.showMessage(f"模式={self.state.projection_mode} | 质量=空闲")
-        self.log_panel.appendPlainText(self.state.log_line())
 
         change_kind = self._detect_change_kind()
         if not schedule_render:
@@ -1346,8 +1473,8 @@ class MainWindow(QtWidgets.QMainWindow):
             return any(previous[key] != current[key] for key in keys)
 
         volume_keys = [
-            "orbital_name",
-            "projection_mode",
+            "orbital_id",
+            "projection_mode_key",
             "angles",
             "resolution",
             "integral_samples",
@@ -1361,8 +1488,8 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _current_params(self) -> dict:
         return {
-            "orbital_name": self.state.orbital_name,
-            "projection_mode": self.state.projection_mode,
+            "orbital_id": self.state.orbital_id,
+            "projection_mode_key": self.state.projection_mode_key,
             "angles": dict(self.state.angles),
             "resolution": self.state.resolution,
             "integral_samples": self.state.integral_samples,
@@ -1422,10 +1549,8 @@ class MainWindow(QtWidgets.QMainWindow):
             should_cancel = reason == "release" or quality_label == "最终"
             if should_cancel:
                 self._cancel_event.set()
-                message = f"渲染请求已合并并取消当前计算（{quality_label}，原因={reason}）"
             else:
-                message = f"渲染请求已合并（不取消当前计算，{quality_label}，原因={reason}）"
-            self.log_panel.appendPlainText(message)
+                _ = quality_label
             return
 
         self._render_request_id += 1
@@ -1436,15 +1561,23 @@ class MainWindow(QtWidgets.QMainWindow):
         self._cancel_event = threading.Event()
         self._clear_views()
 
-        orbital = get_orbital_by_display_name(self.state.orbital_name)
-        mode_key = _mode_key_from_label(self.state.projection_mode)
+        orbital = get_orbital_by_id(self.state.orbital_id)
+        mode_key = self.state.projection_mode_key
         extent = EXTENT_TABLE.get((orbital.orbital_id, mode_key), self.state.extent_base)
         self._extent = extent
         self.state.extent_effective = extent
         for view in self.projection_views.values():
             view.set_extent(extent)
+        self._append_log(
+            _log_event(
+                "extent_used",
+                orbital_id=orbital.orbital_id,
+                mode_key=mode_key,
+                extent=round(extent, 2),
+            )
+        )
         allow_mesh = True
-        if not self.state.projection_mode.startswith("切片") and quality_label == "预览":
+        if mode_key != "slice" and quality_label == "预览":
             now = time.perf_counter()
             if now - self._last_mesh_time < self._mesh_throttle_s:
                 allow_mesh = False
@@ -1453,10 +1586,9 @@ class MainWindow(QtWidgets.QMainWindow):
 
         resolution, samples = self._quality_to_settings(quality_label)
         params = {
-            "orbital_name": self.state.orbital_name,
             "orbital_id": orbital.orbital_id,
-            "projection_mode": self.state.projection_mode,
-            "mode": self.state.projection_mode,
+            "mode_label": self.state.projection_mode,
+            "mode_key": mode_key,
             "angles": dict(self.state.angles),
             "resolution": resolution,
             "samples": samples,
@@ -1474,15 +1606,7 @@ class MainWindow(QtWidgets.QMainWindow):
         reason_text = reason_map.get(reason, reason)
 
         self._update_status(params, 0, "缓存=--")
-        self.log_panel.appendPlainText(
-            "渲染#{rid} 已排队（{quality}，原因={reason}，iso_fixed={iso}%，extent={extent:.1f}）".format(
-                rid=request_id,
-                quality=quality_label,
-                reason=reason_text,
-                iso=ISO_PERCENT_FIXED,
-                extent=extent,
-            )
-        )
+        _ = reason_text
 
         self._render_thread = QtCore.QThread(self)
         self._render_worker = RenderWorker(
@@ -1538,87 +1662,41 @@ class MainWindow(QtWidgets.QMainWindow):
             and not self._extent_retry_attempted
         ):
             self._extent_retry_attempted = True
-            orbital_id = get_orbital_by_display_name(self.state.orbital_name).orbital_id
-            mode_key = _mode_key_from_label(self.state.projection_mode)
+            orbital_id = self.state.orbital_id
+            mode_key = self.state.projection_mode_key
             old_extent = self._extent
             new_extent = math.ceil((old_extent * 1.25 * 1.20) / 10.0) * 10.0
             EXTENT_TABLE[(orbital_id, mode_key)] = float(new_extent)
             _persist_extent_table(EXTENT_TABLE)
-            self.log_panel.appendPlainText(
-                "extent_table updated: {key}: {old:.1f} -> {new:.1f} (clipping detected; retried once)".format(
+            self._append_log(
+                _log_event(
+                    "extent_table_updated",
                     key=f"{orbital_id}|{mode_key}",
-                    old=old_extent,
-                    new=new_extent,
+                    old=round(old_extent, 2),
+                    new=round(new_extent, 2),
                 )
             )
             self._start_render(self._resolve_quality_label(final=True), "extent-retry")
         elif info.get("clipped") and self._extent_retry_attempted:
-            self.log_panel.appendPlainText(
-                "extent retry failed: still clipped after retry (extent={:.1f})".format(self._extent)
+            self._append_log(
+                _log_event("extent_retry_failed", extent=round(self._extent, 2))
             )
 
-        self.log_panel.appendPlainText(
-            "视图 {view} 体积：缓存 {vol}".format(
-                view=view_id,
-                vol="命中" if info["volume_hit"] else "未命中",
-            )
-        )
         if info.get("strict_cancelled"):
-            strict_info = info.get("strict_empty_info") or {"max_abs_pre": 0.0, "iso_pre": 0.0, "extent": 0.0}
-            self.log_panel.appendPlainText(
-                "View {view}: strict empty -> empty (max_abs_pre={max:.3e}, "
-                "iso_pre={iso:.3e}, extent={extent:.1f})".format(
-                    view=view_id,
-                    max=strict_info["max_abs_pre"],
-                    iso=strict_info["iso_pre"],
-                    extent=strict_info["extent"],
-                )
-            )
             self.status_bar.showMessage(
                 "模式={mode} | 质量={quality} | View {view} 严格预检为空".format(
-                    mode=info["mode"],
+                    mode=info["mode_label"],
                     quality=quality_label,
                     view=view_id,
                 )
             )
         elif info["iso_value"] <= 0:
-            self.log_panel.appendPlainText(f"视图 {view_id} 网格：跳过（iso=0）")
-        else:
-            if mesh_pos_data is None:
-                if info.get("mesh_pos_reason") == "throttled":
-                    self.log_panel.appendPlainText(
-                        f"视图 {view_id} 网格：节流跳过（预览）"
-                    )
-                else:
-                    self.log_panel.appendPlainText(
-                        "视图 {view} 无网格（level 超界或拓扑为空）：level={level:.4f}, "
-                        "vol_min={vmin:.4f}, vol_max={vmax:.4f}".format(
-                            view=view_id,
-                            level=info["iso_value"],
-                            vmin=info["vol_min"],
-                            vmax=info["vol_max"],
-                        )
-                    )
-                    self.status_bar.showMessage(
-                        "模式={mode} | 质量={quality} | 无网格：level={level:.4f}, "
-                        "min={vmin:.4f}, max={vmax:.4f}".format(
-                            mode=info["mode"],
-                            quality=quality_label,
-                            level=info["iso_value"],
-                            vmin=info["vol_min"],
-                            vmax=info["vol_max"],
-                        )
-                    )
-            else:
-                self.log_panel.appendPlainText(
-                    "视图 {view} 网格：缓存 {mesh}".format(
-                        view=view_id,
-                        mesh="命中" if (info["mesh_hit_pos"] and info["mesh_hit_neg"]) else "未命中",
-                    )
+            self.status_bar.showMessage(
+                "模式={mode} | 质量={quality} | 无网格：iso=0".format(
+                    mode=info["mode_label"],
+                    quality=quality_label,
                 )
-        self.log_panel.appendPlainText(
-            f"视图 {view_id} 完成，用时 {info['view_time_ms']} ms"
-        )
+            )
 
     def _on_render_finished(self, request_id: int) -> None:
         if request_id != self._active_request_id:
@@ -1662,14 +1740,14 @@ class MainWindow(QtWidgets.QMainWindow):
         self._retired_threads = remaining
 
     def _update_status(self, info: dict, view_index: int, cache_text: str) -> None:
-        mode = info["mode"] if "mode" in info else self.state.projection_mode
+        mode = info["mode_label"] if "mode_label" in info else self.state.projection_mode
         quality_label = info["quality_label"] if "quality_label" in info else "手动"
         self.status_bar.showMessage(
             f"模式={mode} | 质量={quality_label} | 计算中... ({view_index}/4) | {cache_text}"
         )
 
     def _current_orbital_n(self) -> int:
-        orbital = get_orbital_by_display_name(self.state.orbital_name)
+        orbital = get_orbital_by_id(self.state.orbital_id)
         return orbital.n
 
     def _snap_resolution(self, target: int) -> int:

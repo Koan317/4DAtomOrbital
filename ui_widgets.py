@@ -142,6 +142,7 @@ class ProjectionViewWidget(QtWidgets.QWidget):
 
         if has_mesh and not self._camera_initialized:
             self.plotter.reset_camera()
+            self.plotter.reset_camera_clipping_range()
             self._camera_initialized = True
         self.set_empty_message_visible(not has_mesh)
         if self.isVisible():

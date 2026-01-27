@@ -116,6 +116,7 @@
     "7i(k=6)|slice": 30.0,
     "演示/假场 (Debug)|integral_strict": 10.0,
     "演示/假场 (Debug)|slice": 10.0,
-    "演示/假场 (Debug)|integral_abs": 10.0
+    "演示/假场 (Debug)|integral_abs": 10.0,
+    "演示/假场 (Debug)|max_abs": 10.0
   }
 }
