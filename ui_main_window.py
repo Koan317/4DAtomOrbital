@@ -1,3 +1,4 @@
+import math
 import time
 import threading
 from collections import OrderedDict
@@ -9,7 +10,7 @@ from shiboken6 import isValid
 from skimage import measure
 
 from app_state import AppState
-from orbitals import get_orbital_by_display_name, list_orbitals, run_orbital_self_check
+from orbitals import DEMO_ORBITAL, get_orbital_by_display_name, list_orbitals, run_orbital_self_check
 from ui_widgets import ProjectionViewWidget, build_labeled_slider, build_title_label
 
 
@@ -37,12 +38,35 @@ class LRUCache:
             self._data.popitem(last=False)
 
 
-_ORBITAL_INDEX = {
-    "4d_1s": 0,
-    "4d_p_real": 1,
-    "4d_d_real": 2,
-    "demo_fake": 3,
-}
+_ORBITAL_LIST = list_orbitals(include_demo=True)
+_ORBITAL_INDEX = {orb.orbital_id: idx for idx, orb in enumerate(_ORBITAL_LIST)}
+_DEMO_ORBITAL_INDEX = _ORBITAL_INDEX.get(DEMO_ORBITAL.orbital_id, -1)
+_ORBITAL_L = np.array([orb.parameters.get("l", 0) for orb in _ORBITAL_LIST], dtype=np.int64)
+_ORBITAL_K = np.array([orb.parameters.get("k", 0) for orb in _ORBITAL_LIST], dtype=np.int64)
+_ORBITAL_N = np.array([orb.parameters.get("n", 1) for orb in _ORBITAL_LIST], dtype=np.float64)
+_ORBITAL_ALPHA = np.array([orb.parameters.get("alpha", 1.0) for orb in _ORBITAL_LIST], dtype=np.float64)
+
+
+def _build_transverse_tables(max_k: int = 6) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    max_terms = max_k // 2 + 1
+    coeffs = np.zeros((max_k + 1, max_terms), dtype=np.float64)
+    pow_x = np.zeros((max_k + 1, max_terms), dtype=np.int64)
+    pow_y = np.zeros((max_k + 1, max_terms), dtype=np.int64)
+    term_count = np.zeros(max_k + 1, dtype=np.int64)
+    for k in range(max_k + 1):
+        terms = k // 2 + 1
+        term_count[k] = terms
+        for j in range(terms):
+            m = 2 * j
+            coeffs[k, j] = float(math.comb(k, m)) * (-1.0 if j % 2 else 1.0)
+            pow_x[k, j] = k - m
+            pow_y[k, j] = m
+    return coeffs, pow_x, pow_y, term_count
+
+
+_TRANSVERSE_COEFFS, _TRANSVERSE_POW_X, _TRANSVERSE_POW_Y, _TRANSVERSE_TERM_COUNT = (
+    _build_transverse_tables(6)
+)
 
 _VIEW_AXIS = {"X": 0, "Y": 1, "Z": 2, "W": 3}
 
@@ -61,7 +85,6 @@ def _integral_volume_kernel(
     total = n * n * n
     out = np.empty(total, dtype=np.float64)
     eps = 1e-12
-    sqrt2 = np.sqrt(2.0)
 
     for idx in prange(total):
         i = idx // (n * n)
@@ -138,27 +161,32 @@ def _integral_volume_kernel(
                 + w * rotation[3, 3]
             )
 
-            r = np.sqrt(xr * xr + yr * yr + zr * zr + wr * wr)
-            if orbital_index == 0:
-                angular = 1.0
-                radial = np.exp(-r)
-                psi = radial * angular
-            elif orbital_index == 1:
-                if r > eps:
-                    angular = (xr + wr) / (r * sqrt2)
-                else:
-                    angular = 0.0
-                radial = np.exp(-(1.1 / 2.0) * r)
-                psi = radial * angular
-            elif orbital_index == 2:
-                if r > eps:
-                    angular = (xr * xr - yr * yr) / (r * r)
-                else:
-                    angular = 0.0
-                radial = np.exp(-(1.15 / 3.0) * r)
-                psi = radial * angular
-            else:
+            if orbital_index == _DEMO_ORBITAL_INDEX:
+                r = np.sqrt(xr * xr + yr * yr + zr * zr + wr * wr)
                 psi = np.exp(-r) * (xr * xr - yr * yr + 0.35 * zr - 0.25 * wr)
+            else:
+                r = np.sqrt(xr * xr + yr * yr + zr * zr + wr * wr + eps)
+                l_val = _ORBITAL_L[orbital_index]
+                k_val = _ORBITAL_K[orbital_index]
+                n_val = _ORBITAL_N[orbital_index]
+                alpha_val = _ORBITAL_ALPHA[orbital_index]
+
+                transverse = 0.0
+                for t in range(_TRANSVERSE_TERM_COUNT[k_val]):
+                    transverse += (
+                        _TRANSVERSE_COEFFS[k_val, t]
+                        * (xr ** _TRANSVERSE_POW_X[k_val, t])
+                        * (yr ** _TRANSVERSE_POW_Y[k_val, t])
+                    )
+
+                if l_val == 0:
+                    angular = transverse
+                else:
+                    w_power = wr ** (l_val - k_val) if l_val != k_val else 1.0
+                    angular = (w_power * transverse) / (r**l_val)
+
+                radial = np.exp(-(alpha_val / n_val) * r)
+                psi = radial * angular
 
             if mode_flag == 0:
                 acc += psi * weights[m]
@@ -740,7 +768,11 @@ class MainWindow(QtWidgets.QMainWindow):
         layout.addWidget(build_title_label("轨道"))
 
         self.orbital_list = QtWidgets.QListWidget()
-        self.orbital_list.addItems([orb.display_name for orb in list_orbitals()])
+        for orb in list_orbitals():
+            item = QtWidgets.QListWidgetItem(orb.display_name)
+            if orb.description:
+                item.setToolTip(orb.description)
+            self.orbital_list.addItem(item)
         self.orbital_list.setCurrentRow(0)
         self.orbital_list.currentTextChanged.connect(self._on_orbital_changed)
         layout.addWidget(self.orbital_list, 1)
