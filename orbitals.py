@@ -70,8 +70,10 @@ def _angular_1s(
 
 
 def _angular_p_real(chi: np.ndarray, theta: np.ndarray, phi: np.ndarray) -> np.ndarray:
-    """Real p-like harmonic using x/r = sin(chi) sin(theta) cos(phi)."""
-    return np.sin(chi) * np.sin(theta) * np.cos(phi)
+    """Real p-like harmonic using (x + w)/r for smoother slice coverage."""
+    x_over_r = np.sin(chi) * np.sin(theta) * np.cos(phi)
+    w_over_r = np.cos(chi)
+    return (x_over_r + w_over_r) / np.sqrt(2.0)
 
 
 def _angular_d_real(chi: np.ndarray, theta: np.ndarray, phi: np.ndarray) -> np.ndarray:

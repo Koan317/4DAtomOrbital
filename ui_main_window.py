@@ -417,7 +417,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self.state = AppState()
         self._ready = False
-        self._extent = 12.0
+        self._extent = 14.4
         self._render_timer = QtCore.QTimer(self)
         self._render_timer.setSingleShot(True)
         self._render_timer.timeout.connect(self._trigger_scheduled_render)
@@ -672,6 +672,7 @@ class MainWindow(QtWidgets.QMainWindow):
             widgets["slider"].setValue(0)
             widgets["slider"].blockSignals(False)
             self.state.angles[name] = 0
+            widgets["value_label"].setText("000°")
         self.on_ui_changed()
 
     def closeEvent(self, event: QtGui.QCloseEvent) -> None:
