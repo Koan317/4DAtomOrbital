@@ -1147,10 +1147,10 @@ class MainWindow(QtWidgets.QMainWindow):
         layout.setSpacing(10)
 
         self.projection_views = {
-            "X": ProjectionViewWidget("投影 X（到 YZW）", extent=self._extent),
-            "Y": ProjectionViewWidget("投影 Y（到 XZW）", extent=self._extent),
-            "Z": ProjectionViewWidget("投影 Z（到 XYW）", extent=self._extent),
-            "W": ProjectionViewWidget("投影 W（到 XYZ）", extent=self._extent),
+            "X": ProjectionViewWidget("沿x轴投影到yzw空间", extent=self._extent),
+            "Y": ProjectionViewWidget("沿y轴投影到xzw空间", extent=self._extent),
+            "Z": ProjectionViewWidget("沿z轴投影到xyw空间", extent=self._extent),
+            "W": ProjectionViewWidget("沿w轴投影到xyz空间", extent=self._extent),
         }
 
         layout.addWidget(self.projection_views["X"], 0, 0)
@@ -1170,24 +1170,34 @@ class MainWindow(QtWidgets.QMainWindow):
         layout = QtWidgets.QVBoxLayout(panel)
         layout.setSpacing(10)
 
-        layout.addWidget(build_title_label("控制"))
+        title_row = QtWidgets.QHBoxLayout()
+        title_label = build_title_label("控制")
+        title_row.addWidget(title_label)
+        help_button = QtWidgets.QToolButton()
+        help_button.setText("？")
+        help_button.setFixedSize(20, 20)
+        help_button.setToolTip(
+            "六个滑条对应 4D 的六个坐标平面旋转：XY、XZ、XW、YZ、YW、ZW。\n"
+            "拖动滑条会在对应平面内旋转 0–360°。\n"
+            "最终 4D 姿态为这些平面旋转的组合，任一滑条变化都会同步更新所有投影。\n"
+            "XY：旋转 x-y 轴，z/w 在该次旋转中保持不变。\n"
+            "XZ：旋转 x-z。\n"
+            "XW：旋转 x-w。\n"
+            "YZ：旋转 y-z。\n"
+            "YW：旋转 y-w。\n"
+            "ZW：旋转 z-w。"
+        )
+        title_row.addWidget(help_button)
+        title_row.addStretch()
+        layout.addLayout(title_row)
 
         slider_grid = QtWidgets.QGridLayout()
         slider_grid.setHorizontalSpacing(8)
         slider_grid.setVerticalSpacing(6)
 
-        tooltip_map = {
-            "xy": "在 x-y 平面内旋转（混合 x 与 y；z,w 不变）",
-            "xz": "在 x-z 平面内旋转（混合 x 与 z；y,w 不变）",
-            "xw": "在 x-w 平面内旋转（混合 x 与 w；y,z 不变）",
-            "yz": "在 y-z 平面内旋转（混合 y 与 z；x,w 不变）",
-            "yw": "在 y-w 平面内旋转（混合 y 与 w；x,z 不变）",
-            "zw": "在 z-w 平面内旋转（混合 z 与 w；x,y 不变）",
-        }
-
         self.angle_controls = {}
         for row, name in enumerate(["xy", "xz", "xw", "yz", "yw", "zw"]):
-            widgets = build_labeled_slider(name, tooltip_map[name], self._on_angle_changed)
+            widgets = build_labeled_slider(name, self._on_angle_changed)
             self.angle_controls[name] = widgets
             widgets["slider"].sliderReleased.connect(
                 lambda name=name: self._on_angle_released(name)
@@ -1197,7 +1207,6 @@ class MainWindow(QtWidgets.QMainWindow):
             slider_grid.addWidget(widgets["slider"], row, 2)
             slider_grid.addWidget(widgets["plus_button"], row, 3)
             slider_grid.addWidget(widgets["value_label"], row, 4)
-            slider_grid.addWidget(widgets["info_button"], row, 5)
 
         layout.addLayout(slider_grid)
 
@@ -1239,14 +1248,6 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         self.final_quality_combo.currentTextChanged.connect(self.on_ui_changed)
 
-        self.auto_refine = QtWidgets.QCheckBox("自动精细化")
-        self.auto_refine.setChecked(True)
-        self.auto_refine.toggled.connect(self.on_ui_changed)
-
-        self.live_update = QtWidgets.QCheckBox("实时更新")
-        self.live_update.setChecked(True)
-        self.live_update.toggled.connect(self.on_ui_changed)
-
         self.reset_button = QtWidgets.QPushButton("重置角度")
         self.reset_button.clicked.connect(self._reset_angles)
 
@@ -1265,8 +1266,6 @@ class MainWindow(QtWidgets.QMainWindow):
         layout.addWidget(QtWidgets.QLabel("最终质量"))
         layout.addWidget(self.final_quality_combo)
 
-        layout.addWidget(self.auto_refine)
-        layout.addWidget(self.live_update)
         layout.addWidget(self.reset_button)
         self.log_panel = QtWidgets.QPlainTextEdit()
         self.log_panel.setReadOnly(True)
@@ -1293,7 +1292,7 @@ class MainWindow(QtWidgets.QMainWindow):
             widgets["slider"].setValue(0)
             widgets["slider"].blockSignals(False)
             self.state.angles[name] = 0
-            widgets["value_label"].setText("000°")
+            widgets["value_label"].setText("0°")
         self.on_ui_changed()
 
     def closeEvent(self, event: QtGui.QCloseEvent) -> None:
@@ -1320,8 +1319,6 @@ class MainWindow(QtWidgets.QMainWindow):
         self.state.projection_mode = self.projection_mode.currentText()
         self.state.resolution = int(self.resolution_combo.currentText())
         self.state.integral_samples = int(self.samples_combo.currentText())
-        self.state.live_update = self.live_update.isChecked()
-        self.state.auto_refine = self.auto_refine.isChecked()
         self.state.preview_quality = self.preview_quality_combo.currentText()
         self.state.final_quality = self.final_quality_combo.currentText()
         if self.orbital_list.currentItem() is not None:
@@ -1331,7 +1328,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.log_panel.appendPlainText(self.state.log_line())
 
         change_kind = self._detect_change_kind()
-        if not self.state.live_update or not schedule_render:
+        if not schedule_render:
             return
 
         quality_label = self._resolve_quality_label(final=True)
@@ -1357,7 +1354,6 @@ class MainWindow(QtWidgets.QMainWindow):
             "extent",
             "preview_quality",
             "final_quality",
-            "auto_refine",
         ]
         if changed(volume_keys):
             return "volume"
@@ -1373,25 +1369,16 @@ class MainWindow(QtWidgets.QMainWindow):
             "extent": self.state.extent_effective,
             "preview_quality": self.state.preview_quality,
             "final_quality": self.state.final_quality,
-            "auto_refine": self.state.auto_refine,
         }
 
     def _handle_value_change(self, change_kind: str) -> None:
         self.on_ui_changed(schedule_render=False)
-        if not self.state.live_update:
-            return
         self._schedule_render(self._resolve_quality_label(final=False))
 
     def _handle_slider_released(self, change_kind: str) -> None:
-        if not self.state.auto_refine:
-            return
-        if not self.state.live_update:
-            return
         self._start_render(self._resolve_quality_label(final=True), "release")
 
     def _resolve_quality_label(self, final: bool) -> str:
-        if not self.state.auto_refine:
-            return "手动"
         return "最终" if final else "预览"
 
     def _quality_to_settings(self, quality_label: str) -> tuple[int, int]:
