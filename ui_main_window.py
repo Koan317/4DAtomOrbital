@@ -184,13 +184,13 @@ def _extract_mesh(
     vol: np.ndarray,
     level: float,
     extent: float,
-) -> tuple[np.ndarray, np.ndarray] | None:
+) -> tuple[tuple[np.ndarray, np.ndarray] | None, str]:
     if level == 0 or vol.size == 0:
-        return None
+        return None, "level=0 or empty volume"
     vol_min = float(np.min(vol))
     vol_max = float(np.max(vol))
     if not (vol_min <= level <= vol_max):
-        return None
+        return None, "level out of range"
     spacing = (2 * extent) / max(vol.shape[0] - 1, 1)
     origin = np.array([-extent, -extent, -extent], dtype=float)
     try:
@@ -200,11 +200,11 @@ def _extract_mesh(
             spacing=(spacing, spacing, spacing),
         )
     except RuntimeError:
-        return None
+        return None, "marching cubes failed"
     if verts.size == 0 or faces.size == 0:
-        return None
+        return None, "empty topology"
     verts = verts + origin
-    return verts, faces
+    return (verts, faces), ""
 
 
 class RenderWorker(QtCore.QObject):
@@ -296,31 +296,37 @@ class RenderWorker(QtCore.QObject):
                 with self._cache_lock:
                     self._volume_cache.set(volume_key, vol)
 
-            max_abs = float(np.max(np.abs(vol))) if vol.size else 0.0
+            vol_min = float(np.min(vol)) if vol.size else 0.0
+            vol_max = float(np.max(vol)) if vol.size else 0.0
+            max_abs = max(abs(vol_min), abs(vol_max)) if vol.size else 0.0
             iso_value = (iso_percent / 100.0) * max_abs if iso_percent > 0 else 0.0
+            is_non_negative_mode = mode.startswith("积分 |ψ|") or mode.startswith("最大 |ψ|")
 
             mesh_hit_pos = False
             mesh_hit_neg = False
             mesh_pos = None
             mesh_neg = None
+            mesh_pos_reason = ""
+            mesh_neg_reason = ""
 
             if iso_value > 0 and vol.size:
                 pos_key = _mesh_cache_key(volume_key, iso_value, 1)
                 neg_key = _mesh_cache_key(volume_key, iso_value, -1)
                 with self._cache_lock:
                     mesh_hit_pos, cached_pos = self._mesh_cache.get_with_hit(pos_key)
-                    mesh_hit_neg, cached_neg = self._mesh_cache.get_with_hit(neg_key)
+                    if not is_non_negative_mode:
+                        mesh_hit_neg, cached_neg = self._mesh_cache.get_with_hit(neg_key)
                 if mesh_hit_pos:
                     mesh_pos = cached_pos
                 if mesh_hit_neg:
                     mesh_neg = cached_neg
 
                 if mesh_pos is None:
-                    mesh_pos = _extract_mesh(vol, iso_value, extent)
+                    mesh_pos, mesh_pos_reason = _extract_mesh(vol, iso_value, extent)
                     with self._cache_lock:
                         self._mesh_cache.set(pos_key, mesh_pos)
-                if mesh_neg is None:
-                    mesh_neg = _extract_mesh(vol, -iso_value, extent)
+                if not is_non_negative_mode and mesh_neg is None:
+                    mesh_neg, mesh_neg_reason = _extract_mesh(vol, -iso_value, extent)
                     with self._cache_lock:
                         self._mesh_cache.set(neg_key, mesh_neg)
 
@@ -336,6 +342,11 @@ class RenderWorker(QtCore.QObject):
                 "resolution": resolution,
                 "samples": samples,
                 "iso_value": iso_value,
+                "vol_min": vol_min,
+                "vol_max": vol_max,
+                "max_abs": max_abs,
+                "mesh_pos_reason": mesh_pos_reason,
+                "mesh_neg_reason": mesh_neg_reason,
             }
             self.view_ready.emit(self._request_id, view_id, mesh_pos, mesh_neg, info)
 
@@ -424,7 +435,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self.state = AppState()
         self._ready = False
-        self._extent = 14.4
+        self._extent = 8.0
         self._render_timer = QtCore.QTimer(self)
         self._render_timer.setSingleShot(True)
         self._render_timer.timeout.connect(self._trigger_scheduled_render)
@@ -717,6 +728,16 @@ class MainWindow(QtWidgets.QMainWindow):
         if self.orbital_list.currentItem() is not None:
             self.state.orbital_name = self.orbital_list.currentItem().text()
 
+        if (
+            not self.state.projection_mode.startswith("切片")
+            and self.state.iso_percent == 0
+        ):
+            self.isosurface_slider.blockSignals(True)
+            self.isosurface_slider.setValue(15)
+            self.isosurface_slider.blockSignals(False)
+            self.isosurface_value.setText("15%")
+            self.state.iso_percent = 15
+
         self.status_bar.showMessage(f"模式={self.state.projection_mode} | 质量=空闲")
         self.log_panel.appendPlainText(self.state.log_line())
 
@@ -849,8 +870,15 @@ class MainWindow(QtWidgets.QMainWindow):
         for view_id, vol in volume_hits.items():
             max_abs = float(np.max(np.abs(vol))) if vol.size else 0.0
             iso_value = (iso_percent / 100.0) * max_abs if iso_percent > 0 else 0.0
-            mesh_pos = _extract_mesh(vol, iso_value, extent) if iso_value > 0 else None
-            mesh_neg = _extract_mesh(vol, -iso_value, extent) if iso_value > 0 else None
+            if iso_value > 0:
+                mesh_pos, _ = _extract_mesh(vol, iso_value, extent)
+                if mode.startswith("积分 |ψ|") or mode.startswith("最大 |ψ|"):
+                    mesh_neg = None
+                else:
+                    mesh_neg, _ = _extract_mesh(vol, -iso_value, extent)
+            else:
+                mesh_pos = None
+                mesh_neg = None
             self.projection_views[view_id].set_meshes(mesh_pos, mesh_neg, 1.0)
         self.log_panel.appendPlainText("等值面仅网格更新（预览）")
 
@@ -960,12 +988,33 @@ class MainWindow(QtWidgets.QMainWindow):
         if info["iso_value"] <= 0:
             self.log_panel.appendPlainText(f"视图 {view_id} 网格：跳过（iso=0）")
         else:
-            self.log_panel.appendPlainText(
-                "视图 {view} 网格：缓存 {mesh}".format(
-                    view=view_id,
-                    mesh="命中" if (info["mesh_hit_pos"] and info["mesh_hit_neg"]) else "未命中",
+            if mesh_pos_data is None:
+                self.log_panel.appendPlainText(
+                    "视图 {view} 无网格（level 超界或拓扑为空）：level={level:.4f}, "
+                    "vol_min={vmin:.4f}, vol_max={vmax:.4f}".format(
+                        view=view_id,
+                        level=info["iso_value"],
+                        vmin=info["vol_min"],
+                        vmax=info["vol_max"],
+                    )
                 )
-            )
+                self.status_bar.showMessage(
+                    "模式={mode} | 质量={quality} | 无网格：level={level:.4f}, "
+                    "min={vmin:.4f}, max={vmax:.4f}".format(
+                        mode=info["mode"],
+                        quality=quality_label,
+                        level=info["iso_value"],
+                        vmin=info["vol_min"],
+                        vmax=info["vol_max"],
+                    )
+                )
+            else:
+                self.log_panel.appendPlainText(
+                    "视图 {view} 网格：缓存 {mesh}".format(
+                        view=view_id,
+                        mesh="命中" if (info["mesh_hit_pos"] and info["mesh_hit_neg"]) else "未命中",
+                    )
+                )
         self.log_panel.appendPlainText(
             f"视图 {view_id} 完成，用时 {info['view_time_ms']} ms"
         )
