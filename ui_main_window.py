@@ -662,7 +662,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self.state = AppState()
         self._ready = False
-        self._extent = 8.0
+        self._extent = 20.0
         self._last_mesh_time = 0.0
         self._mesh_throttle_s = 0.3
         self._render_timer = QtCore.QTimer(self)
