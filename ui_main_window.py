@@ -7,11 +7,8 @@ from shiboken6 import isValid
 from skimage import measure
 
 from app_state import AppState
-from ui_widgets import (
-    ProjectionViewWidget,
-    build_labeled_slider,
-    build_title_label,
-)
+from orbitals import get_orbital_by_display_name, list_orbitals, run_orbital_self_check
+from ui_widgets import ProjectionViewWidget, build_labeled_slider, build_title_label
 
 
 class LRUCache:
@@ -72,6 +69,7 @@ def _generate_slice_volume(
     resolution: int,
     extent: float,
     rotation: np.ndarray,
+    orbital_name: str,
 ) -> np.ndarray:
     coords = np.linspace(-extent, extent, resolution)
     grid_a, grid_b, grid_c = np.meshgrid(coords, coords, coords, indexing="ij")
@@ -98,8 +96,8 @@ def _generate_slice_volume(
     zr = rotated[2].reshape(z.shape)
     wr = rotated[3].reshape(w.shape)
 
-    r = np.sqrt(xr**2 + yr**2 + zr**2 + wr**2)
-    return np.exp(-r) * (xr**2 - yr**2 + 0.35 * zr - 0.25 * wr)
+    orbital = get_orbital_by_display_name(orbital_name)
+    return orbital.evaluate(xr, yr, zr, wr)
 
 
 def _generate_integral_volume(
@@ -109,6 +107,7 @@ def _generate_integral_volume(
     rotation: np.ndarray,
     samples: int,
     mode: str,
+    orbital_name: str,
     cancel_event: threading.Event | None = None,
 ) -> np.ndarray | None:
     coords = np.linspace(-extent, extent, resolution)
@@ -142,6 +141,7 @@ def _generate_integral_volume(
         x_flat, y_flat, z_flat = x.reshape(-1), y.reshape(-1), z.reshape(-1)
 
     accumulator = np.zeros_like(grid_flat, dtype=np.float64)
+    orbital = get_orbital_by_display_name(orbital_name)
 
     for t_value, weight in zip(nodes, weights):
         if cancel_event is not None and cancel_event.is_set():
@@ -161,8 +161,7 @@ def _generate_integral_volume(
 
         rotated = points @ rotation.T
         xr, yr, zr, wr = rotated[:, 0], rotated[:, 1], rotated[:, 2], rotated[:, 3]
-        r = np.sqrt(xr**2 + yr**2 + zr**2 + wr**2)
-        psi = np.exp(-r) * (xr**2 - yr**2 + 0.35 * zr - 0.25 * wr)
+        psi = orbital.evaluate(xr, yr, zr, wr)
 
         if mode.startswith("积分 ψ"):
             accumulator += psi * weight
@@ -265,7 +264,13 @@ class RenderWorker(QtCore.QObject):
                 vol = cached_vol
             else:
                 if mode.startswith("切片"):
-                    vol = _generate_slice_volume(view_id, resolution, extent, rotation)
+                    vol = _generate_slice_volume(
+                        view_id,
+                        resolution,
+                        extent,
+                        rotation,
+                        self._params["orbital_name"],
+                    )
                 else:
                     vol = _generate_integral_volume(
                         view_id,
@@ -274,6 +279,7 @@ class RenderWorker(QtCore.QObject):
                         rotation,
                         samples,
                         mode,
+                        self._params["orbital_name"],
                         cancel_event=self._cancel_event,
                     )
                     if vol is None:
@@ -435,8 +441,17 @@ class MainWindow(QtWidgets.QMainWindow):
         self._build_status_bar()
         self._build_central()
 
+        self._run_orbital_self_check()
         self._ready = True
         self.on_ui_changed()
+
+    def _run_orbital_self_check(self) -> None:
+        warnings = run_orbital_self_check()
+        if not warnings:
+            self.log_panel.appendPlainText("轨道自检：通过")
+            return
+        for warning in warnings:
+            self.log_panel.appendPlainText(f"轨道自检警告：{warning}")
 
     def _build_status_bar(self) -> None:
         self.status_bar = QtWidgets.QStatusBar()
@@ -477,7 +492,7 @@ class MainWindow(QtWidgets.QMainWindow):
         layout.addWidget(build_title_label("轨道"))
 
         self.orbital_list = QtWidgets.QListWidget()
-        self.orbital_list.addItems(["1s", "2p（组 A）", "3d（组 A）", "4f（组 A）"])
+        self.orbital_list.addItems([orb.display_name for orb in list_orbitals()])
         self.orbital_list.setCurrentRow(0)
         self.orbital_list.currentTextChanged.connect(self._on_orbital_changed)
         layout.addWidget(self.orbital_list, 1)

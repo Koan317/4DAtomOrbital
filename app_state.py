@@ -3,7 +3,7 @@ from dataclasses import dataclass, field
 
 @dataclass
 class AppState:
-    orbital_name: str = "1s"
+    orbital_name: str = "4D 1s（球对称）"
     angles: dict = field(
         default_factory=lambda: {
             "xy": 0,
