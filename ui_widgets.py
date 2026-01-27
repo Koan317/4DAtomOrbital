@@ -42,6 +42,15 @@ def build_labeled_slider(
     slider = QtWidgets.QSlider(QtCore.Qt.Orientation.Horizontal)
     slider.setRange(0, 360)
     slider.setValue(0)
+    slider.setSingleStep(1)
+
+    minus_button = QtWidgets.QToolButton()
+    minus_button.setText("−")
+    minus_button.setFixedSize(22, 22)
+
+    plus_button = QtWidgets.QToolButton()
+    plus_button.setText("+")
+    plus_button.setFixedSize(22, 22)
 
     value_label = QtWidgets.QLabel("000°")
     value_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignRight | QtCore.Qt.AlignmentFlag.AlignVCenter)
@@ -58,9 +67,17 @@ def build_labeled_slider(
 
     slider.valueChanged.connect(handle_value_changed)
 
+    def adjust_by(delta: int) -> None:
+        slider.setValue(max(slider.minimum(), min(slider.maximum(), slider.value() + delta)))
+
+    minus_button.clicked.connect(lambda: adjust_by(-1))
+    plus_button.clicked.connect(lambda: adjust_by(1))
+
     return {
         "label": label,
+        "minus_button": minus_button,
         "slider": slider,
+        "plus_button": plus_button,
         "value_label": value_label,
         "info_button": info_button,
     }
@@ -79,7 +96,6 @@ class ProjectionViewWidget(QtWidgets.QWidget):
 
         title_label = QtWidgets.QLabel(title)
         title_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignLeft)
-        title_label.setStyleSheet("color: #dddddd;")
         layout.addWidget(title_label)
 
         self.plotter = QtInteractor(self)
