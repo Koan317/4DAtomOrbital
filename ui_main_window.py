@@ -458,7 +458,7 @@ class MainWindow(QtWidgets.QMainWindow):
         right_panel = self._build_right_panel()
 
         left_panel.setMinimumWidth(180)
-        right_panel.setMinimumWidth(360)
+        right_panel.setMinimumWidth(240)
 
         splitter.addWidget(left_panel)
         splitter.addWidget(center_panel)
@@ -467,7 +467,7 @@ class MainWindow(QtWidgets.QMainWindow):
         splitter.setStretchFactor(0, 1)
         splitter.setStretchFactor(1, 3)
         splitter.setStretchFactor(2, 2)
-        splitter.setSizes([200, 650, 450])
+        splitter.setSizes([200, 650, 300])
 
     def _build_left_panel(self) -> QtWidgets.QWidget:
         panel = QtWidgets.QWidget()
@@ -560,13 +560,6 @@ class MainWindow(QtWidgets.QMainWindow):
         self.isosurface_slider.valueChanged.connect(self._on_isosurface_changed)
         self.isosurface_slider.sliderReleased.connect(self._on_isosurface_released)
 
-        self.opacity_slider = QtWidgets.QSlider(QtCore.Qt.Orientation.Horizontal)
-        self.opacity_slider.setRange(0, 100)
-        self.opacity_slider.setValue(0)
-        self.opacity_value = QtWidgets.QLabel("0%")
-        self.opacity_slider.valueChanged.connect(self._on_opacity_changed)
-        self.opacity_slider.sliderReleased.connect(self._on_opacity_released)
-
         self.resolution_combo = QtWidgets.QComboBox()
         self.resolution_combo.addItems(["64", "96", "128"])
         self.resolution_combo.currentTextChanged.connect(self.on_ui_changed)
@@ -604,9 +597,6 @@ class MainWindow(QtWidgets.QMainWindow):
         self.reset_button = QtWidgets.QPushButton("重置角度")
         self.reset_button.clicked.connect(self._reset_angles)
 
-        self.render_button = QtWidgets.QPushButton("立即渲染")
-        self.render_button.clicked.connect(self._on_render_now)
-
         layout.addWidget(QtWidgets.QLabel("投影模式"))
         layout.addWidget(self.projection_mode)
 
@@ -616,13 +606,6 @@ class MainWindow(QtWidgets.QMainWindow):
         iso_layout.addWidget(self.isosurface_value)
         layout.addLayout(iso_layout)
         layout.addWidget(self.isosurface_slider)
-
-        opacity_layout = QtWidgets.QHBoxLayout()
-        opacity_layout.addWidget(QtWidgets.QLabel("不透明度"))
-        opacity_layout.addStretch(1)
-        opacity_layout.addWidget(self.opacity_value)
-        layout.addLayout(opacity_layout)
-        layout.addWidget(self.opacity_slider)
 
         layout.addWidget(QtWidgets.QLabel("分辨率"))
         layout.addWidget(self.resolution_combo)
@@ -639,7 +622,6 @@ class MainWindow(QtWidgets.QMainWindow):
         layout.addWidget(self.auto_refine)
         layout.addWidget(self.live_update)
         layout.addWidget(self.reset_button)
-        layout.addWidget(self.render_button)
         self.log_panel = QtWidgets.QPlainTextEdit()
         self.log_panel.setReadOnly(True)
         self.log_panel.setPlaceholderText("界面事件日志...")
@@ -667,14 +649,6 @@ class MainWindow(QtWidgets.QMainWindow):
     def _on_isosurface_released(self) -> None:
         self._handle_slider_released("iso")
 
-    def _on_opacity_changed(self, value: int) -> None:
-        self.opacity_value.setText(f"{value}%")
-        self.state.opacity_percent = value
-        self._handle_value_change("opacity")
-
-    def _on_opacity_released(self) -> None:
-        self._handle_slider_released("opacity")
-
     def _reset_angles(self) -> None:
         for name, widgets in self.angle_controls.items():
             widgets["slider"].blockSignals(True)
@@ -682,9 +656,6 @@ class MainWindow(QtWidgets.QMainWindow):
             widgets["slider"].blockSignals(False)
             self.state.angles[name] = 0
         self.on_ui_changed()
-
-    def _on_render_now(self) -> None:
-        self._start_render(self._resolve_quality_label(final=True), "manual")
 
     def closeEvent(self, event: QtGui.QCloseEvent) -> None:
         if self._render_timer.isActive():
@@ -727,10 +698,6 @@ class MainWindow(QtWidgets.QMainWindow):
         if not self.state.live_update or not schedule_render:
             return
 
-        if change_kind == "opacity":
-            self._apply_opacity_only()
-            return
-
         quality_label = self._resolve_quality_label(final=True)
         self._schedule_render(quality_label)
 
@@ -759,8 +726,6 @@ class MainWindow(QtWidgets.QMainWindow):
             return "volume"
         if previous["iso_percent"] != current["iso_percent"]:
             return "iso"
-        if previous["opacity_percent"] != current["opacity_percent"]:
-            return "opacity"
         return "none"
 
     def _current_params(self) -> dict:
@@ -771,7 +736,6 @@ class MainWindow(QtWidgets.QMainWindow):
             "resolution": self.state.resolution,
             "integral_samples": self.state.integral_samples,
             "iso_percent": self.state.iso_percent,
-            "opacity_percent": self.state.opacity_percent,
             "preview_quality": self.state.preview_quality,
             "final_quality": self.state.final_quality,
             "auto_refine": self.state.auto_refine,
@@ -780,10 +744,6 @@ class MainWindow(QtWidgets.QMainWindow):
     def _handle_value_change(self, change_kind: str) -> None:
         self.on_ui_changed(schedule_render=False)
         if not self.state.live_update:
-            return
-        if change_kind == "opacity":
-            if self.state.live_update:
-                self._apply_opacity_only()
             return
         if change_kind == "iso":
             self._schedule_iso_mesh_update()
@@ -794,9 +754,6 @@ class MainWindow(QtWidgets.QMainWindow):
         if not self.state.auto_refine:
             return
         if not self.state.live_update:
-            return
-        if change_kind == "opacity":
-            self._apply_opacity_only()
             return
         self._start_render(self._resolve_quality_label(final=True), "release")
 
@@ -863,13 +820,12 @@ class MainWindow(QtWidgets.QMainWindow):
                 return
             volume_hits[view_id] = cached_vol
 
-        opacity = self.state.opacity_percent / 100.0
         for view_id, vol in volume_hits.items():
             max_abs = float(np.max(np.abs(vol))) if vol.size else 0.0
             iso_value = (iso_percent / 100.0) * max_abs if iso_percent > 0 else 0.0
             mesh_pos = _extract_mesh(vol, iso_value, extent) if iso_value > 0 else None
             mesh_neg = _extract_mesh(vol, -iso_value, extent) if iso_value > 0 else None
-            self.projection_views[view_id].set_meshes(mesh_pos, mesh_neg, opacity)
+            self.projection_views[view_id].set_meshes(mesh_pos, mesh_neg, 1.0)
         self.log_panel.appendPlainText("等值面仅网格更新（预览）")
 
     def _start_render(self, quality_label: str, reason: str) -> None:
@@ -905,7 +861,6 @@ class MainWindow(QtWidgets.QMainWindow):
             "resolution": resolution,
             "samples": samples,
             "iso_percent": self.state.iso_percent,
-            "opacity": self.state.opacity_percent / 100.0,
             "extent": self._extent,
             "quality_label": quality_label,
         }
@@ -966,11 +921,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
         mesh_pos_data = mesh_pos if isinstance(mesh_pos, tuple) else None
         mesh_neg_data = mesh_neg if isinstance(mesh_neg, tuple) else None
-        self.projection_views[view_id].set_meshes(
-            mesh_pos_data,
-            mesh_neg_data,
-            self.state.opacity_percent / 100.0,
-        )
+        self.projection_views[view_id].set_meshes(mesh_pos_data, mesh_neg_data, 1.0)
 
         self.log_panel.appendPlainText(
             "视图 {view} 体积：缓存 {vol}".format(
@@ -1017,12 +968,6 @@ class MainWindow(QtWidgets.QMainWindow):
             else:
                 thread.quit()
         self._retired_threads = remaining
-
-    def _apply_opacity_only(self) -> None:
-        opacity = self.state.opacity_percent / 100.0
-        for view in self.projection_views.values():
-            view.set_opacity(opacity)
-        self.log_panel.appendPlainText("仅不透明度更新：对象已刷新")
 
     def _update_status(self, info: dict, view_index: int, cache_text: str) -> None:
         mode = info["mode"] if "mode" in info else self.state.projection_mode

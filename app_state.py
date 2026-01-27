@@ -16,7 +16,6 @@ class AppState:
     )
     projection_mode: str = "切片（快速）"
     iso_percent: int = 0
-    opacity_percent: int = 0
     resolution: int = 64
     integral_samples: int = 32
     live_update: bool = True
@@ -40,6 +39,6 @@ class AppState:
         return (
             f"轨道={self.orbital_name}, 角度=[{self.angle_summary()}], "
             f"模式={self.projection_mode}, 等值={self.iso_percent}%, "
-            f"不透明度={self.opacity_percent}%, 分辨率={self.resolution}, "
+            f"分辨率={self.resolution}, "
             f"采样={self.integral_samples}, 自动精细化={self.auto_refine}"
         )
