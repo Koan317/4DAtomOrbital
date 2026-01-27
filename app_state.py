@@ -40,7 +40,7 @@ class AppState:
     def log_line(self) -> str:
         return (
             f"轨道={self.orbital_name}, 角度=[{self.angle_summary()}], "
-            f"模式={self.projection_mode}, iso_fixed=12%, "
+            f"模式={self.projection_mode}, iso_fixed=3.0%, "
             f"范围={self.extent_effective:.1f}, 分辨率={self.resolution}, "
             f"采样={self.integral_samples}, 自动精细化={self.auto_refine}, "
             f"自动范围={self.auto_extent}"

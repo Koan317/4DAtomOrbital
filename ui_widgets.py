@@ -127,9 +127,6 @@ class ProjectionViewWidget(QtWidgets.QWidget):
         negative_mesh: tuple[np.ndarray, np.ndarray] | None,
         opacity: float,
     ) -> None:
-        if not self.isVisible():
-            return
-
         for actor in self._mesh_actors.values():
             try:
                 self.plotter.remove_actor(actor)
@@ -153,7 +150,9 @@ class ProjectionViewWidget(QtWidgets.QWidget):
         if has_mesh and not self._camera_initialized:
             self.plotter.reset_camera()
             self._camera_initialized = True
-        self.plotter.render()
+        self.set_empty_message_visible(not has_mesh)
+        if self.isVisible():
+            self.plotter.render()
 
     def set_empty_overlay(self, visible: bool) -> None:
         self.set_empty_message_visible(visible)
@@ -166,6 +165,10 @@ class ProjectionViewWidget(QtWidgets.QWidget):
 
     def set_empty_message_text(self, text: str) -> None:
         self._empty_overlay.setText(text)
+
+    def set_extent(self, extent: float) -> None:
+        self._extent = extent
+        self._camera_initialized = False
 
     def _add_mesh(
         self,

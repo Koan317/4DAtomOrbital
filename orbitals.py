@@ -28,6 +28,16 @@ class Orbital:
     ) -> np.ndarray:
         return self._evaluator(x, y, z, w)
 
+    def recommended_extent(self, iso_percent: float, margin: float = 0.2) -> float:
+        """Estimate extent from iso percentage with safety margin."""
+        p = max(float(iso_percent) / 100.0, 1e-9)
+        alpha = float(self.parameters.get("alpha", 1.0))
+        n_val = max(float(self.n), 1.0)
+        r_iso = (n_val / alpha) * math.log(1.0 / p)
+        extent = (1.0 + margin) * r_iso
+        extent = math.ceil(extent / 1.0) * 1.0
+        return max(extent, 6.0)
+
 
 def _radial_envelope(r: np.ndarray, n: int, alpha: float = 1.0) -> np.ndarray:
     """Simple decaying radial envelope exp(-alpha * r / n) for stable visuals."""
