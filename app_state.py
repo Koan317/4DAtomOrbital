@@ -14,15 +14,15 @@ class AppState:
             "zw": 0,
         }
     )
-    projection_mode: str = "slice (fast)"
+    projection_mode: str = "切片（快速）"
     iso_percent: int = 0
     opacity_percent: int = 0
     resolution: int = 64
     integral_samples: int = 32
     live_update: bool = True
     auto_refine: bool = True
-    preview_quality: str = "Fast"
-    final_quality: str = "High"
+    preview_quality: str = "快速"
+    final_quality: str = "高"
 
     def angle_summary(self) -> str:
         return ",".join(
@@ -34,12 +34,12 @@ class AppState:
             f"{key}={self.angles[key]:03d}°"
             for key in ["xy", "xz", "xw", "yz", "yw", "zw"]
         )
-        return f"Orbital: {self.orbital_name} | {angle_text}"
+        return f"轨道：{self.orbital_name} | {angle_text}"
 
     def log_line(self) -> str:
         return (
-            f"Orbital={self.orbital_name}, angles=[{self.angle_summary()}], "
-            f"mode={self.projection_mode}, iso={self.iso_percent}%, "
-            f"opacity={self.opacity_percent}%, res={self.resolution}, "
-            f"samples={self.integral_samples}, auto_refine={self.auto_refine}"
+            f"轨道={self.orbital_name}, 角度=[{self.angle_summary()}], "
+            f"模式={self.projection_mode}, 等值={self.iso_percent}%, "
+            f"不透明度={self.opacity_percent}%, 分辨率={self.resolution}, "
+            f"采样={self.integral_samples}, 自动精细化={self.auto_refine}"
         )

@@ -48,7 +48,7 @@ def _volume_cache_key(
     view_id: str,
 ) -> tuple:
     angle_tuple = tuple(angles[name] for name in ["xy", "xz", "xw", "yz", "yw", "zw"])
-    sample_value = samples if not projection_mode.startswith("slice") else 0
+    sample_value = samples if not projection_mode.startswith("切片") else 0
     return (orbital_name, projection_mode, angle_tuple, resolution, sample_value, extent, view_id)
 
 
@@ -164,9 +164,9 @@ def _generate_integral_volume(
         r = np.sqrt(xr**2 + yr**2 + zr**2 + wr**2)
         psi = np.exp(-r) * (xr**2 - yr**2 + 0.35 * zr - 0.25 * wr)
 
-        if mode.startswith("integral ψ"):
+        if mode.startswith("积分 ψ"):
             accumulator += psi * weight
-        elif mode.startswith("integral |ψ|"):
+        elif mode.startswith("积分 |ψ|"):
             accumulator += np.abs(psi) * weight
         else:
             accumulator = np.maximum(accumulator, np.abs(psi))
@@ -233,7 +233,7 @@ class RenderWorker(QtCore.QObject):
         extent = self._params["extent"]
 
         self.log_line.emit(
-            "Render#{rid} start ({quality}): mode={mode}, N={res}, M={samples}".format(
+            "渲染#{rid} 开始（{quality}）：模式={mode}, N={res}, M={samples}".format(
                 rid=self._request_id,
                 quality=quality_label,
                 mode=mode,
@@ -264,7 +264,7 @@ class RenderWorker(QtCore.QObject):
             if volume_hit:
                 vol = cached_vol
             else:
-                if mode.startswith("slice"):
+                if mode.startswith("切片"):
                     vol = _generate_slice_volume(view_id, resolution, extent, rotation)
                 else:
                     vol = _generate_integral_volume(
@@ -327,7 +327,7 @@ class RenderWorker(QtCore.QObject):
             self.view_ready.emit(self._request_id, view_id, mesh_pos, mesh_neg, info)
 
         total_ms = int((time.perf_counter() - start_total) * 1000)
-        self.log_line.emit(f"Render#{self._request_id} finished in {total_ms} ms")
+        self.log_line.emit(f"渲染#{self._request_id} 完成，用时 {total_ms} ms")
         self.finished.emit(self._request_id)
 
 
@@ -406,7 +406,7 @@ def _rotation_matrix_zw(theta_deg: float) -> np.ndarray:
 class MainWindow(QtWidgets.QMainWindow):
     def __init__(self) -> None:
         super().__init__()
-        self.setWindowTitle("4D Atomic Orbital Viewer")
+        self.setWindowTitle("4D 原子轨道查看器")
         self.resize(1200, 720)
 
         self.state = AppState()
@@ -415,10 +415,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self._render_timer = QtCore.QTimer(self)
         self._render_timer.setSingleShot(True)
         self._render_timer.timeout.connect(self._trigger_scheduled_render)
-        self._pending_quality_label = "Preview"
+        self._pending_quality_label = "预览"
         self._iso_timer = QtCore.QTimer(self)
         self._iso_timer.setSingleShot(True)
-        self._iso_timer.timeout.connect(lambda: self._update_mesh_only("Preview"))
+        self._iso_timer.timeout.connect(lambda: self._update_mesh_only("预览"))
 
         self._volume_cache = LRUCache(max_items=16)
         self._mesh_cache = LRUCache(max_items=32)
@@ -432,19 +432,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self._retired_threads: list[tuple[QtCore.QThread, RenderWorker, threading.Event]] = []
         self._last_params: dict | None = None
 
-        self._build_menu()
         self._build_status_bar()
         self._build_central()
 
         self._ready = True
         self.on_ui_changed()
-
-    def _build_menu(self) -> None:
-        menu_bar = self.menuBar()
-        menu_bar.addMenu("File")
-        menu_bar.addMenu("Export")
-        menu_bar.addMenu("View")
-        menu_bar.addMenu("Help")
 
     def _build_status_bar(self) -> None:
         self.status_bar = QtWidgets.QStatusBar()
@@ -461,28 +453,31 @@ class MainWindow(QtWidgets.QMainWindow):
         splitter.setChildrenCollapsible(False)
         layout.addWidget(splitter)
 
-        splitter.addWidget(self._build_left_panel())
-        splitter.addWidget(self._build_center_panel())
-        splitter.addWidget(self._build_right_panel())
+        left_panel = self._build_left_panel()
+        center_panel = self._build_center_panel()
+        right_panel = self._build_right_panel()
 
-        splitter.setStretchFactor(0, 0)
-        splitter.setStretchFactor(1, 2)
-        splitter.setStretchFactor(2, 1)
+        left_panel.setMinimumWidth(180)
+        right_panel.setMinimumWidth(360)
+
+        splitter.addWidget(left_panel)
+        splitter.addWidget(center_panel)
+        splitter.addWidget(right_panel)
+
+        splitter.setStretchFactor(0, 1)
+        splitter.setStretchFactor(1, 3)
+        splitter.setStretchFactor(2, 2)
+        splitter.setSizes([200, 650, 450])
 
     def _build_left_panel(self) -> QtWidgets.QWidget:
         panel = QtWidgets.QWidget()
         layout = QtWidgets.QVBoxLayout(panel)
         layout.setSpacing(8)
 
-        layout.addWidget(build_title_label("Orbitals"))
-
-        self.search_input = QtWidgets.QLineEdit()
-        self.search_input.setPlaceholderText("Search orbitals...")
-        self.search_input.textChanged.connect(self.on_ui_changed)
-        layout.addWidget(self.search_input)
+        layout.addWidget(build_title_label("轨道"))
 
         self.orbital_list = QtWidgets.QListWidget()
-        self.orbital_list.addItems(["1s", "2p (set A)", "3d (set A)", "4f (set A)"])
+        self.orbital_list.addItems(["1s", "2p（组 A）", "3d（组 A）", "4f（组 A）"])
         self.orbital_list.setCurrentRow(0)
         self.orbital_list.currentTextChanged.connect(self._on_orbital_changed)
         layout.addWidget(self.orbital_list, 1)
@@ -495,10 +490,10 @@ class MainWindow(QtWidgets.QMainWindow):
         layout.setSpacing(10)
 
         self.projection_views = {
-            "X": ProjectionViewWidget("Projection X (to YZW)", extent=self._extent),
-            "Y": ProjectionViewWidget("Projection Y (to XZW)", extent=self._extent),
-            "Z": ProjectionViewWidget("Projection Z (to XYW)", extent=self._extent),
-            "W": ProjectionViewWidget("Projection W (to XYZ)", extent=self._extent),
+            "X": ProjectionViewWidget("投影 X（到 YZW）", extent=self._extent),
+            "Y": ProjectionViewWidget("投影 Y（到 XZW）", extent=self._extent),
+            "Z": ProjectionViewWidget("投影 Z（到 XYW）", extent=self._extent),
+            "W": ProjectionViewWidget("投影 W（到 XYZ）", extent=self._extent),
         }
 
         layout.addWidget(self.projection_views["X"], 0, 0)
@@ -518,19 +513,19 @@ class MainWindow(QtWidgets.QMainWindow):
         layout = QtWidgets.QVBoxLayout(panel)
         layout.setSpacing(10)
 
-        layout.addWidget(build_title_label("Controls"))
+        layout.addWidget(build_title_label("控制"))
 
         slider_grid = QtWidgets.QGridLayout()
         slider_grid.setHorizontalSpacing(8)
         slider_grid.setVerticalSpacing(6)
 
         tooltip_map = {
-            "xy": "rotate within the x-y plane (mix x and y; z,w unchanged)",
-            "xz": "rotate within the x-z plane (mix x and z; y,w unchanged)",
-            "xw": "rotate within the x-w plane (mix x and w; y,z unchanged)",
-            "yz": "rotate within the y-z plane (mix y and z; x,w unchanged)",
-            "yw": "rotate within the y-w plane (mix y and w; x,z unchanged)",
-            "zw": "rotate within the z-w plane (mix z and w; x,y unchanged)",
+            "xy": "在 x-y 平面内旋转（混合 x 与 y；z,w 不变）",
+            "xz": "在 x-z 平面内旋转（混合 x 与 z；y,w 不变）",
+            "xw": "在 x-w 平面内旋转（混合 x 与 w；y,z 不变）",
+            "yz": "在 y-z 平面内旋转（混合 y 与 z；x,w 不变）",
+            "yw": "在 y-w 平面内旋转（混合 y 与 w；x,z 不变）",
+            "zw": "在 z-w 平面内旋转（混合 z 与 w；x,y 不变）",
         }
 
         self.angle_controls = {}
@@ -550,10 +545,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self.projection_mode = QtWidgets.QComboBox()
         self.projection_mode.addItems(
             [
-                "slice (fast)",
-                "integral ψ (strict)",
-                "integral |ψ| (stable)",
-                "max |ψ| (visual)",
+                "切片（快速）",
+                "积分 ψ（严格）",
+                "积分 |ψ|（稳定）",
+                "最大 |ψ|（可视化）",
             ]
         )
         self.projection_mode.currentTextChanged.connect(self.on_ui_changed)
@@ -583,8 +578,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.preview_quality_combo = QtWidgets.QComboBox()
         self.preview_quality_combo.addItems(
             [
-                "Fast (N=64, samples=32)",
-                "Medium (N=96, samples=64)",
+                "快速（N=64，采样=32）",
+                "中等（N=96，采样=64）",
             ]
         )
         self.preview_quality_combo.currentTextChanged.connect(self.on_ui_changed)
@@ -592,67 +587,62 @@ class MainWindow(QtWidgets.QMainWindow):
         self.final_quality_combo = QtWidgets.QComboBox()
         self.final_quality_combo.addItems(
             [
-                "High (N=128, samples=128)",
-                "Ultra (N=160, samples=256)",
+                "高（N=128，采样=128）",
+                "超高（N=160，采样=256）",
             ]
         )
         self.final_quality_combo.currentTextChanged.connect(self.on_ui_changed)
 
-        self.auto_refine = QtWidgets.QCheckBox("Auto Refine")
+        self.auto_refine = QtWidgets.QCheckBox("自动精细化")
         self.auto_refine.setChecked(True)
         self.auto_refine.toggled.connect(self.on_ui_changed)
 
-        self.live_update = QtWidgets.QCheckBox("Live Update")
+        self.live_update = QtWidgets.QCheckBox("实时更新")
         self.live_update.setChecked(True)
         self.live_update.toggled.connect(self.on_ui_changed)
 
-        self.reset_button = QtWidgets.QPushButton("Reset Angles")
+        self.reset_button = QtWidgets.QPushButton("重置角度")
         self.reset_button.clicked.connect(self._reset_angles)
 
-        self.render_button = QtWidgets.QPushButton("Render Now")
+        self.render_button = QtWidgets.QPushButton("立即渲染")
         self.render_button.clicked.connect(self._on_render_now)
 
-        self.cancel_button = QtWidgets.QPushButton("Cancel")
-        self.cancel_button.clicked.connect(self._on_cancel_render)
-
-        layout.addWidget(QtWidgets.QLabel("Projection Mode"))
+        layout.addWidget(QtWidgets.QLabel("投影模式"))
         layout.addWidget(self.projection_mode)
 
         iso_layout = QtWidgets.QHBoxLayout()
-        iso_layout.addWidget(QtWidgets.QLabel("Isosurface Level"))
+        iso_layout.addWidget(QtWidgets.QLabel("等值面级别"))
         iso_layout.addStretch(1)
         iso_layout.addWidget(self.isosurface_value)
         layout.addLayout(iso_layout)
         layout.addWidget(self.isosurface_slider)
 
         opacity_layout = QtWidgets.QHBoxLayout()
-        opacity_layout.addWidget(QtWidgets.QLabel("Opacity"))
+        opacity_layout.addWidget(QtWidgets.QLabel("不透明度"))
         opacity_layout.addStretch(1)
         opacity_layout.addWidget(self.opacity_value)
         layout.addLayout(opacity_layout)
         layout.addWidget(self.opacity_slider)
 
-        layout.addWidget(QtWidgets.QLabel("Resolution"))
+        layout.addWidget(QtWidgets.QLabel("分辨率"))
         layout.addWidget(self.resolution_combo)
 
-        layout.addWidget(QtWidgets.QLabel("Integral Samples"))
+        layout.addWidget(QtWidgets.QLabel("积分采样"))
         layout.addWidget(self.samples_combo)
 
-        layout.addWidget(QtWidgets.QLabel("Preview Quality"))
+        layout.addWidget(QtWidgets.QLabel("预览质量"))
         layout.addWidget(self.preview_quality_combo)
 
-        layout.addWidget(QtWidgets.QLabel("Final Quality"))
+        layout.addWidget(QtWidgets.QLabel("最终质量"))
         layout.addWidget(self.final_quality_combo)
 
         layout.addWidget(self.auto_refine)
         layout.addWidget(self.live_update)
         layout.addWidget(self.reset_button)
         layout.addWidget(self.render_button)
-        layout.addWidget(self.cancel_button)
-
         self.log_panel = QtWidgets.QPlainTextEdit()
         self.log_panel.setReadOnly(True)
-        self.log_panel.setPlaceholderText("UI event log...")
+        self.log_panel.setPlaceholderText("界面事件日志...")
         layout.addWidget(self.log_panel, 1)
 
         return panel
@@ -696,11 +686,6 @@ class MainWindow(QtWidgets.QMainWindow):
     def _on_render_now(self) -> None:
         self._start_render(self._resolve_quality_label(final=True), "manual")
 
-    def _on_cancel_render(self) -> None:
-        if self._cancel_event is not None:
-            self._cancel_event.set()
-        self.log_panel.appendPlainText("Cancel requested")
-
     def closeEvent(self, event: QtGui.QCloseEvent) -> None:
         if self._render_timer.isActive():
             self._render_timer.stop()
@@ -735,7 +720,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if self.orbital_list.currentItem() is not None:
             self.state.orbital_name = self.orbital_list.currentItem().text()
 
-        self.status_bar.showMessage(f"Mode={self.state.projection_mode} | Quality=Idle")
+        self.status_bar.showMessage(f"模式={self.state.projection_mode} | 质量=空闲")
         self.log_panel.appendPlainText(self.state.log_line())
 
         change_kind = self._detect_change_kind()
@@ -817,22 +802,22 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _resolve_quality_label(self, final: bool) -> str:
         if not self.state.auto_refine:
-            return "Manual"
-        return "Final" if final else "Preview"
+            return "手动"
+        return "最终" if final else "预览"
 
     def _quality_to_settings(self, quality_label: str) -> tuple[int, int]:
-        if quality_label == "Preview":
+        if quality_label == "预览":
             current = self.preview_quality_combo.currentText()
             mapping = {
-                "Fast (N=64, samples=32)": (64, 32),
-                "Medium (N=96, samples=64)": (96, 64),
+                "快速（N=64，采样=32）": (64, 32),
+                "中等（N=96，采样=64）": (96, 64),
             }
             return mapping[current]
-        if quality_label == "Final":
+        if quality_label == "最终":
             current = self.final_quality_combo.currentText()
             mapping = {
-                "High (N=128, samples=128)": (128, 128),
-                "Ultra (N=160, samples=256)": (160, 256),
+                "高（N=128，采样=128）": (128, 128),
+                "超高（N=160，采样=256）": (160, 256),
             }
             return mapping[current]
         return self.state.resolution, self.state.integral_samples
@@ -885,7 +870,7 @@ class MainWindow(QtWidgets.QMainWindow):
             mesh_pos = _extract_mesh(vol, iso_value, extent) if iso_value > 0 else None
             mesh_neg = _extract_mesh(vol, -iso_value, extent) if iso_value > 0 else None
             self.projection_views[view_id].set_meshes(mesh_pos, mesh_neg, opacity)
-        self.log_panel.appendPlainText("ISO mesh-only update (preview)")
+        self.log_panel.appendPlainText("等值面仅网格更新（预览）")
 
     def _start_render(self, quality_label: str, reason: str) -> None:
         if not self.isVisible():
@@ -925,9 +910,17 @@ class MainWindow(QtWidgets.QMainWindow):
             "quality_label": quality_label,
         }
 
-        self._update_status(params, 0, "Cache=--")
+        reason_map = {
+            "manual": "手动",
+            "release": "释放",
+            "scheduled": "定时",
+            "iso-mesh-miss": "等值面缓存未命中",
+        }
+        reason_text = reason_map.get(reason, reason)
+
+        self._update_status(params, 0, "缓存=--")
         self.log_panel.appendPlainText(
-            f"Render#{request_id} queued ({quality_label}, reason={reason})"
+            f"渲染#{request_id} 已排队（{quality_label}，原因={reason_text}）"
         )
 
         self._render_thread = QtCore.QThread(self)
@@ -965,9 +958,9 @@ class MainWindow(QtWidgets.QMainWindow):
             return
 
         quality_label = info["quality_label"]
-        cache_text = "Cache vol={v} mesh={m}".format(
-            v="HIT" if info["volume_hit"] else "MISS",
-            m="HIT" if (info["mesh_hit_pos"] and info["mesh_hit_neg"]) else "MISS",
+        cache_text = "缓存 体积={v} 网格={m}".format(
+            v="命中" if info["volume_hit"] else "未命中",
+            m="命中" if (info["mesh_hit_pos"] and info["mesh_hit_neg"]) else "未命中",
         )
         self._update_status(info, info["view_index"], cache_text)
 
@@ -980,30 +973,28 @@ class MainWindow(QtWidgets.QMainWindow):
         )
 
         self.log_panel.appendPlainText(
-            "View {view} volume: cache {vol}".format(
+            "视图 {view} 体积：缓存 {vol}".format(
                 view=view_id,
-                vol="HIT" if info["volume_hit"] else "MISS",
+                vol="命中" if info["volume_hit"] else "未命中",
             )
         )
         if info["iso_value"] <= 0:
-            self.log_panel.appendPlainText(f"View {view_id} mesh: skipped (iso=0)")
+            self.log_panel.appendPlainText(f"视图 {view_id} 网格：跳过（iso=0）")
         else:
             self.log_panel.appendPlainText(
-                "View {view} mesh: cache {mesh}".format(
+                "视图 {view} 网格：缓存 {mesh}".format(
                     view=view_id,
-                    mesh="HIT" if (info["mesh_hit_pos"] and info["mesh_hit_neg"]) else "MISS",
+                    mesh="命中" if (info["mesh_hit_pos"] and info["mesh_hit_neg"]) else "未命中",
                 )
             )
         self.log_panel.appendPlainText(
-            f"View {view_id} done in {info['view_time_ms']} ms"
+            f"视图 {view_id} 完成，用时 {info['view_time_ms']} ms"
         )
 
     def _on_render_finished(self, request_id: int) -> None:
         if request_id != self._active_request_id:
             return
-        self.status_bar.showMessage(
-            f"Mode={self.state.projection_mode} | Quality=Idle"
-        )
+        self.status_bar.showMessage(f"模式={self.state.projection_mode} | 质量=空闲")
 
     def _on_render_thread_finished(self) -> None:
         self._render_thread = None
@@ -1031,11 +1022,11 @@ class MainWindow(QtWidgets.QMainWindow):
         opacity = self.state.opacity_percent / 100.0
         for view in self.projection_views.values():
             view.set_opacity(opacity)
-        self.log_panel.appendPlainText("Opacity only: actor updated")
+        self.log_panel.appendPlainText("仅不透明度更新：对象已刷新")
 
     def _update_status(self, info: dict, view_index: int, cache_text: str) -> None:
         mode = info["mode"] if "mode" in info else self.state.projection_mode
-        quality_label = info["quality_label"] if "quality_label" in info else "Manual"
+        quality_label = info["quality_label"] if "quality_label" in info else "手动"
         self.status_bar.showMessage(
-            f"Mode={mode} | Quality={quality_label} | Computing... ({view_index}/4) | {cache_text}"
+            f"模式={mode} | 质量={quality_label} | 计算中... ({view_index}/4) | {cache_text}"
         )
