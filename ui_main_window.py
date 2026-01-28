@@ -758,11 +758,11 @@ def calibrate_extents(
     return table
 
 
-    def run_selftest() -> int:
-        loaded, _ = _load_extent_table()
-        if loaded is not None:
-            EXTENT_TABLE.clear()
-            EXTENT_TABLE.update(loaded)
+def run_selftest() -> int:
+    loaded, _ = _load_extent_table()
+    if loaded is not None:
+        EXTENT_TABLE.clear()
+        EXTENT_TABLE.update(loaded)
 
     manifest = get_orbital_manifest(include_demo=True)
     mode_keys = list(MODE_KEY_MAP.values())
@@ -1012,6 +1012,7 @@ class RenderWorker(QtCore.QObject):
                 "mode_key": mode_key,
                 "resolution": resolution,
                 "samples": samples,
+                "extent": extent,
                 "iso_value": iso_value,
                 "vol_min": vol_min,
                 "vol_max": vol_max,
@@ -1081,88 +1082,101 @@ class RenderWorker(QtCore.QObject):
         else:
             futures = {}
             with ProcessPoolExecutor(max_workers=4) as executor:
-                for view_id in view_ids:
-                    if self._cancel_event.is_set():
-                        break
-                    volume_key = _volume_cache_key(
-                        orbital_id,
-                        mode_key,
-                        self._params["angles"],
-                        resolution,
-                        samples,
-                        extent,
-                        view_id,
-                    )
-                    with self._cache_lock:
-                        volume_hit, cached_vol = self._volume_cache.get_with_hit(volume_key)
-                    if volume_hit:
-                        handle_volume(view_id, cached_vol, True)
-                        continue
-                    if mode_key == "integral_strict":
-                        precheck = _precheck_strict_integral(
+                try:
+                    for view_id in view_ids:
+                        if self._cancel_event.is_set():
+                            for future in futures:
+                                future.cancel()
+                            executor.shutdown(wait=False, cancel_futures=True)
+                            futures.clear()
+                            break
+                        volume_key = _volume_cache_key(
+                            orbital_id,
+                            mode_key,
+                            self._params["angles"],
+                            resolution,
+                            samples,
+                            extent,
+                            view_id,
+                        )
+                        with self._cache_lock:
+                            volume_hit, cached_vol = self._volume_cache.get_with_hit(volume_key)
+                        if volume_hit:
+                            handle_volume(view_id, cached_vol, True)
+                            continue
+                        if mode_key == "integral_strict":
+                            precheck = _precheck_strict_integral(
+                                view_id,
+                                resolution,
+                                extent,
+                                rotation,
+                                orbital_id,
+                            )
+                            if _is_strict_cancellation_dominated(
+                                precheck["max_abs"],
+                                precheck["mean_abs"],
+                                precheck["q95"],
+                                precheck["shell_max"],
+                            ):
+                                strict_early_empty_info[view_id] = {
+                                    "max_abs_pre": precheck["max_abs"],
+                                    "mean_abs_pre": precheck["mean_abs"],
+                                    "q95_pre": precheck["q95"],
+                                    "shell_max_pre": precheck["shell_max"],
+                                    "extent": extent,
+                                    "reason": "strict-empty-precheck",
+                                }
+                                self.log_line.emit(
+                                    _log_event(
+                                        "strict_empty",
+                                        orbital_id=orbital_id,
+                                        mode_key=mode_key,
+                                        view_id=view_id,
+                                        extent=round(extent, 2),
+                                        max_abs_pre=f"{precheck['max_abs']:.3e}",
+                                        mean_abs_pre=f"{precheck['mean_abs']:.3e}",
+                                        q95_pre=f"{precheck['q95']:.3e}",
+                                        shell_max_pre=f"{precheck['shell_max']:.3e}",
+                                    )
+                                )
+                                empty_vol = np.array([])
+                                with self._cache_lock:
+                                    self._volume_cache.set(volume_key, empty_vol)
+                                handle_volume(view_id, empty_vol, False)
+                                continue
+                        future = executor.submit(
+                            _compute_integral_volume_task,
                             view_id,
                             resolution,
                             extent,
                             rotation,
+                            samples,
+                            mode_key,
                             orbital_id,
                         )
-                        if _is_strict_cancellation_dominated(
-                            precheck["max_abs"],
-                            precheck["mean_abs"],
-                            precheck["q95"],
-                            precheck["shell_max"],
-                        ):
-                            strict_early_empty_info[view_id] = {
-                                "max_abs_pre": precheck["max_abs"],
-                                "mean_abs_pre": precheck["mean_abs"],
-                                "q95_pre": precheck["q95"],
-                                "shell_max_pre": precheck["shell_max"],
-                                "extent": extent,
-                                "reason": "strict-empty-precheck",
-                            }
-                            self.log_line.emit(
-                                _log_event(
-                                    "strict_empty",
-                                    orbital_id=orbital_id,
-                                    mode_key=mode_key,
-                                    view_id=view_id,
-                                    extent=round(extent, 2),
-                                    max_abs_pre=f"{precheck['max_abs']:.3e}",
-                                    mean_abs_pre=f"{precheck['mean_abs']:.3e}",
-                                    q95_pre=f"{precheck['q95']:.3e}",
-                                    shell_max_pre=f"{precheck['shell_max']:.3e}",
-                                )
-                            )
-                            empty_vol = np.array([])
-                            with self._cache_lock:
-                                self._volume_cache.set(volume_key, empty_vol)
-                            handle_volume(view_id, empty_vol, False)
-                            continue
-                    future = executor.submit(
-                        _compute_integral_volume_task,
-                        view_id,
-                        resolution,
-                        extent,
-                        rotation,
-                        samples,
-                        mode_key,
-                        orbital_id,
-                    )
-                    futures[future] = volume_key
+                        futures[future] = volume_key
 
-                for future in as_completed(futures):
-                    volume_key = futures[future]
-                    try:
-                        view_id, vol = future.result()
-                    except Exception:
-                        continue
+                    for future in as_completed(futures):
+                        if self._cancel_event.is_set():
+                            for pending in futures:
+                                pending.cancel()
+                            executor.shutdown(wait=False, cancel_futures=True)
+                            break
+                        volume_key = futures[future]
+                        try:
+                            view_id, vol = future.result()
+                        except Exception:
+                            continue
+                        if vol.size and not np.isfinite(vol).all():
+                            vol = np.array([])
+                        with self._cache_lock:
+                            self._volume_cache.set(volume_key, vol)
+                        handle_volume(view_id, vol, False)
+                finally:
                     if self._cancel_event.is_set():
-                        continue
-                    if vol.size and not np.isfinite(vol).all():
-                        vol = np.array([])
-                    with self._cache_lock:
-                        self._volume_cache.set(volume_key, vol)
-                    handle_volume(view_id, vol, False)
+                        for future in futures:
+                            future.cancel()
+                        executor.shutdown(wait=False, cancel_futures=True)
 
         _ = start_total
         self.finished.emit(self._request_id)
@@ -1272,7 +1286,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._last_params: dict | None = None
         self._pending_render_request: tuple[str, str] | None = None
         self._pending_after_finish = False
-        self._closing = False
+        self._shutting_down = False
         self._extent_retry_request_id: int | None = None
         self._extent_retry_attempted = False
 
@@ -1574,8 +1588,10 @@ class MainWindow(QtWidgets.QMainWindow):
             widgets["value_label"].setText("0°")
         self.on_ui_changed()
 
-    def closeEvent(self, event: QtGui.QCloseEvent) -> None:
-        self._closing = True
+    def shutdown(self) -> bool:
+        if self._shutting_down:
+            return True
+        self._shutting_down = True
         if self._render_timer.isActive():
             self._render_timer.stop()
         if self._cancel_event is not None:
@@ -1586,6 +1602,7 @@ class MainWindow(QtWidgets.QMainWindow):
             and self._render_thread.isRunning()
         ):
             self._append_log("Shutdown: waiting render thread...")
+            self._render_thread.quit()
             start_time = time.monotonic()
             while self._render_thread.isRunning() and (time.monotonic() - start_time) < 10.0:
                 self._render_thread.wait(100)
@@ -1595,9 +1612,14 @@ class MainWindow(QtWidgets.QMainWindow):
                     "Shutdown: render thread did not exit in time; keeping references to avoid QThread destroyed"
                 )
                 self.status_bar.showMessage("正在退出：等待后台计算结束…")
-                event.ignore()
-                return
-        self._cleanup_retired_threads()
+                return False
+        self._cleanup_retired_threads(force=True)
+        return True
+
+    def closeEvent(self, event: QtGui.QCloseEvent) -> None:
+        if not self.shutdown():
+            event.ignore()
+            return
         for view in self.projection_views.values():
             view.plotter.close()
         super().closeEvent(event)
@@ -1693,18 +1715,22 @@ class MainWindow(QtWidgets.QMainWindow):
         return self.state.resolution, self.state.integral_samples
 
     def _schedule_render(self, quality_label: str) -> None:
+        if self._shutting_down:
+            return
         self._pending_quality_label = quality_label
         if self._render_timer.isActive():
             return
         self._render_timer.start(60)
 
     def _trigger_scheduled_render(self) -> None:
+        if self._shutting_down:
+            return
         self._start_render(self._pending_quality_label, "scheduled")
 
     def _start_render(self, quality_label: str, reason: str) -> None:
         if not self.isVisible():
             return
-        if self._closing:
+        if self._shutting_down:
             return
 
         if (
@@ -1821,6 +1847,23 @@ class MainWindow(QtWidgets.QMainWindow):
             m="命中" if (info["mesh_hit_pos"] and info["mesh_hit_neg"]) else "未命中",
         )
         self._update_status(info, info["view_index"], cache_text)
+        self._append_log(
+            _log_event(
+                "view_status",
+                view_id=view_id,
+                resolution=info.get("resolution"),
+                samples=info.get("samples"),
+                extent=round(float(info.get("extent", self._extent)), 2)
+                if info.get("extent") is not None
+                else round(self._extent, 2),
+                mesh_hit_pos=info.get("mesh_hit_pos"),
+                mesh_hit_neg=info.get("mesh_hit_neg"),
+                mesh_pos_reason=info.get("mesh_pos_reason"),
+                mesh_neg_reason=info.get("mesh_neg_reason"),
+                strict_cancelled=info.get("strict_cancelled"),
+                strict_empty_reason=info.get("strict_empty_reason"),
+            )
+        )
 
         mesh_pos_data = mesh_pos if isinstance(mesh_pos, tuple) else None
         mesh_neg_data = mesh_neg if isinstance(mesh_neg, tuple) else None
@@ -1885,7 +1928,11 @@ class MainWindow(QtWidgets.QMainWindow):
             self._retired_threads.append(thread)
             self._retired_workers.append(worker)
         self._cleanup_retired_threads()
-        if self._pending_after_finish and self._pending_render_request is not None and not self._closing:
+        if (
+            self._pending_after_finish
+            and self._pending_render_request is not None
+            and not self._shutting_down
+        ):
             quality_label, reason = self._pending_render_request
             self._pending_render_request = None
             self._pending_after_finish = False
@@ -1894,7 +1941,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self._pending_render_request = None
             self._pending_after_finish = False
 
-    def _cleanup_retired_threads(self) -> None:
+    def _cleanup_retired_threads(self, force: bool = False) -> None:
         remaining_threads: list[QtCore.QThread] = []
         remaining_workers: list[QtCore.QObject] = []
         count = min(len(self._retired_threads), len(self._retired_workers))
@@ -1912,10 +1959,33 @@ class MainWindow(QtWidgets.QMainWindow):
                     remaining_workers.append(worker)
                 continue
             if running:
-                remaining_threads.append(thread)
-                if worker is not None:
-                    remaining_workers.append(worker)
-                continue
+                if force:
+                    try:
+                        thread.quit()
+                    except RuntimeError as exc:
+                        self._append_log(f"cleanup_retired_thread_quit_failed: {exc}")
+                    try:
+                        thread.wait(10000)
+                    except RuntimeError as exc:
+                        self._append_log(f"cleanup_retired_thread_wait_failed: {exc}")
+                    try:
+                        running = thread.isRunning()
+                    except RuntimeError as exc:
+                        self._append_log(f"cleanup_retired_thread_check_failed: {exc}")
+                        remaining_threads.append(thread)
+                        if worker is not None:
+                            remaining_workers.append(worker)
+                        continue
+                    if running:
+                        remaining_threads.append(thread)
+                        if worker is not None:
+                            remaining_workers.append(worker)
+                        continue
+                else:
+                    remaining_threads.append(thread)
+                    if worker is not None:
+                        remaining_workers.append(worker)
+                    continue
             try:
                 thread.deleteLater()
             except RuntimeError as exc:

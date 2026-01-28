@@ -8,7 +8,7 @@ os.environ.setdefault("MKL_NUM_THREADS", "1")
 os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
 os.environ.setdefault("NUMEXPR_NUM_THREADS", "1")
 
-from ui_main_window import MainWindow, calibrate_extents, run_selftest
+from ui_main_window import MainWindow, calibrate_extents
 
 
 def main() -> None:
@@ -17,6 +17,8 @@ def main() -> None:
     parser.add_argument("--selftest", action="store_true", help="Run correctness self-test and exit.")
     args, _ = parser.parse_known_args()
     if args.selftest:
+        from ui_main_window import run_selftest
+
         code = run_selftest()
         raise SystemExit(code)
     if os.getenv("CALIBRATE_EXTENTS") == "1":
@@ -30,6 +32,7 @@ def main() -> None:
 
     app = QtWidgets.QApplication(sys.argv)
     window = MainWindow()
+    app.aboutToQuit.connect(window.shutdown)
     window.show()
     sys.exit(app.exec())
 
