@@ -65,6 +65,8 @@ STRICT_PRECHECK_SAMPLES = 8
 STRICT_ABS_EPS = 1e-10
 STRICT_CANCEL_RATIO = 0.02
 STRICT_MAX_CAP = 1e-6
+VOLUME_ABS_EPS = 1e-10
+ISO_ABS_EPS = 1e-12
 
 EXTENT_TABLE = {
     ("1s(k=0)", "slice"): 10.0,
@@ -1001,6 +1003,22 @@ class RenderWorker(QtCore.QObject):
             strict_empty_info = strict_early_empty_info.get(view_id)
             strict_cancelled = strict_mode and strict_empty_info is not None
             strict_empty_reason = strict_empty_info.get("reason") if strict_empty_info else ""
+            numerical_empty = False
+
+            if max_abs <= VOLUME_ABS_EPS or iso_value <= ISO_ABS_EPS:
+                numerical_empty = True
+                strict_cancelled = False
+                strict_empty_reason = "numerical-empty"
+                self.log_line.emit(
+                    _log_event(
+                        "numerical_empty",
+                        orbital_id=orbital_id,
+                        mode_key=mode_key,
+                        view_id=view_id,
+                        max_abs=f"{max_abs:.3e}",
+                        iso_value=f"{iso_value:.3e}",
+                    )
+                )
 
             if strict_mode and not strict_cancelled and vol.size:
                 if max_abs <= STRICT_ABS_EPS:
@@ -1042,7 +1060,12 @@ class RenderWorker(QtCore.QObject):
                 view_id,
             )
 
-            if iso_value > 0 and vol.size and not strict_cancelled:
+            if numerical_empty:
+                mesh_pos_reason = "numerical-empty"
+                mesh_neg_reason = "numerical-empty"
+                mesh_pos = None
+                mesh_neg = None
+            elif iso_value > 0 and vol.size and not strict_cancelled:
                 pos_key = _mesh_cache_key(volume_key, iso_value, 1)
                 neg_key = _mesh_cache_key(volume_key, iso_value, -1)
                 with self._cache_lock:
