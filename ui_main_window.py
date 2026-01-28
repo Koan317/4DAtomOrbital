@@ -1299,9 +1299,6 @@ class MainWindow(QtWidgets.QMainWindow):
         self._build_status_bar()
         self._build_central()
         self._load_extent_table()
-        self._append_log(
-            "复现建议：选择 2p(k=0)，切到 积分 ψ（严格），把某个角度滑到 XX°（用户提供），观察 W 视图是否应为空。"
-        )
 
         self._run_orbital_self_check()
         self._ready = True
@@ -1551,7 +1548,6 @@ class MainWindow(QtWidgets.QMainWindow):
                 "  XY / XZ / XW / YZ / YW / ZW：分别表示在对应坐标平面内旋转",
                 "  组合效果：最终姿态是6个平面旋转叠加；调整任意一个会同步影响全部4个投影视图",
                 f"  当前角度：{angle_text}",
-                "  注意：这里显示不需要补前导0（例如 5° 而不是 005°）",
             ]
         )
         self.explanation_text.setPlainText(text)
