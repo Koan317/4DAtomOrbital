@@ -1102,6 +1102,9 @@ class RenderWorker(QtCore.QObject):
                 mesh_neg_reason = strict_empty_reason or "strict-empty"
 
             t2 = time.perf_counter()
+            vol_ms = (t1 - t0) * 1000
+            mesh_ms = (t2 - t1) * 1000
+            total_ms = (t2 - t0) * 1000
             self.log_line.emit(
                 "perf: "
                 f"req={self._request_id} "
@@ -1110,11 +1113,30 @@ class RenderWorker(QtCore.QObject):
                 f"res={resolution} "
                 f"samples={samples} "
                 f"extent={extent} "
-                f"vol_ms={(t1 - t0) * 1000:.2f} "
-                f"mesh_ms={(t2 - t1) * 1000:.2f} "
-                f"total_ms={(t2 - t0) * 1000:.2f} "
+                f"vol_ms={vol_ms:.2f} "
+                f"mesh_ms={mesh_ms:.2f} "
+                f"total_ms={total_ms:.2f} "
                 f"mesh_backend={mesh_backend}"
             )
+            if (
+                mode_key in {"integral_strict", "integral_abs"}
+                and orbital_id == "1s(k=0)"
+                and resolution == 64
+                and samples == 32
+                and vol_ms > 1200
+            ):
+                self.log_line.emit(
+                    _log_event(
+                        "perf_warn",
+                        mode_key=mode_key,
+                        orbital_id=orbital_id,
+                        view_id=view_id,
+                        resolution=resolution,
+                        samples=samples,
+                        vol_ms=f"{vol_ms:.2f}",
+                        target_ms=1200,
+                    )
+                )
 
             clipped = False
             shell_max = 0.0
@@ -1842,6 +1864,34 @@ class MainWindow(QtWidgets.QMainWindow):
             return mapping[current]
         return self.state.resolution, self.state.integral_samples
 
+    def _apply_quality_caps(
+        self,
+        mode_key: str,
+        quality_label: str,
+        resolution: int,
+        samples: int,
+    ) -> tuple[int, int]:
+        if mode_key not in {"integral_strict", "integral_abs", "max_abs"}:
+            return resolution, samples
+        if quality_label == "预览":
+            cap_resolution = 48
+            cap_samples = 16
+        else:
+            cap_resolution = 64
+            cap_samples = 32
+        used_resolution = min(resolution, cap_resolution)
+        used_samples = min(samples, cap_samples)
+        if used_resolution != resolution or used_samples != samples:
+            self._append_log(
+                "quality_cap: "
+                f"mode={mode_key} "
+                f"requested_res={resolution} "
+                f"requested_samples={samples} "
+                f"used_res={used_resolution} "
+                f"used_samples={used_samples}"
+            )
+        return used_resolution, used_samples
+
     def _schedule_render(self, quality_label: str) -> None:
         if self._shutting_down:
             return
@@ -1905,6 +1955,12 @@ class MainWindow(QtWidgets.QMainWindow):
                 self._last_mesh_time = now
 
         resolution, samples = self._quality_to_settings(quality_label)
+        resolution, samples = self._apply_quality_caps(
+            mode_key,
+            quality_label,
+            resolution,
+            samples,
+        )
         params = {
             "orbital_id": orbital.orbital_id,
             "mode_label": self.state.projection_mode,
