@@ -989,7 +989,13 @@ class RenderWorker(QtCore.QObject):
         view_ids = ["X", "Y", "Z", "W"]
         view_index = {view_id: idx for idx, view_id in enumerate(view_ids, start=1)}
 
-        def handle_volume(view_id: str, vol: np.ndarray, volume_hit: bool) -> None:
+        def handle_volume(
+            view_id: str,
+            vol: np.ndarray,
+            volume_hit: bool,
+            t0: float,
+            t1: float,
+        ) -> None:
             if self._cancel_event.is_set():
                 return
             view_start = time.perf_counter()
@@ -1003,6 +1009,7 @@ class RenderWorker(QtCore.QObject):
             strict_cancelled = strict_mode and strict_empty_info is not None
             strict_empty_reason = strict_empty_info.get("reason") if strict_empty_info else ""
             numerical_empty = False
+            mesh_backend = "skimage"
 
             if max_abs <= VOLUME_ABS_EPS or iso_value <= ISO_ABS_EPS:
                 numerical_empty = True
@@ -1094,6 +1101,21 @@ class RenderWorker(QtCore.QObject):
                 mesh_pos_reason = strict_empty_reason or "strict-empty"
                 mesh_neg_reason = strict_empty_reason or "strict-empty"
 
+            t2 = time.perf_counter()
+            self.log_line.emit(
+                "perf: "
+                f"req={self._request_id} "
+                f"view={view_id} "
+                f"mode={mode_key} "
+                f"res={resolution} "
+                f"samples={samples} "
+                f"extent={extent} "
+                f"vol_ms={(t1 - t0) * 1000:.2f} "
+                f"mesh_ms={(t2 - t1) * 1000:.2f} "
+                f"total_ms={(t2 - t0) * 1000:.2f} "
+                f"mesh_backend={mesh_backend}"
+            )
+
             clipped = False
             shell_max = 0.0
             if quality_label == "最终" and not strict_cancelled:
@@ -1159,6 +1181,7 @@ class RenderWorker(QtCore.QObject):
             for view_id in view_ids:
                 if self._cancel_event.is_set():
                     break
+                t0 = time.perf_counter()
                 volume_key = _volume_cache_key(
                     orbital_id,
                     mode_key,
@@ -1184,9 +1207,11 @@ class RenderWorker(QtCore.QObject):
                         vol = np.array([])
                     with self._cache_lock:
                         self._volume_cache.set(volume_key, vol)
-                handle_volume(view_id, vol, volume_hit)
+                t1 = time.perf_counter()
+                handle_volume(view_id, vol, volume_hit, t0, t1)
         else:
             futures = {}
+            future_start_times: dict[object, float] = {}
             with ProcessPoolExecutor(max_workers=4) as executor:
                 try:
                     for view_id in view_ids:
@@ -1196,6 +1221,7 @@ class RenderWorker(QtCore.QObject):
                             executor.shutdown(wait=False, cancel_futures=True)
                             futures.clear()
                             break
+                        t0 = time.perf_counter()
                         volume_key = _volume_cache_key(
                             orbital_id,
                             mode_key,
@@ -1208,7 +1234,8 @@ class RenderWorker(QtCore.QObject):
                         with self._cache_lock:
                             volume_hit, cached_vol = self._volume_cache.get_with_hit(volume_key)
                         if volume_hit:
-                            handle_volume(view_id, cached_vol, True)
+                            t1 = time.perf_counter()
+                            handle_volume(view_id, cached_vol, True, t0, t1)
                             continue
                         if mode_key == "integral_strict":
                             precheck = _precheck_strict_integral(
@@ -1244,7 +1271,8 @@ class RenderWorker(QtCore.QObject):
                                 empty_vol = np.array([])
                                 with self._cache_lock:
                                     self._volume_cache.set(volume_key, empty_vol)
-                                handle_volume(view_id, empty_vol, False)
+                                t1 = time.perf_counter()
+                                handle_volume(view_id, empty_vol, False, t0, t1)
                                 continue
                             if ratio < STRICT_CANCEL_RATIO and strict_max < STRICT_MAX_CAP:
                                 strict_early_empty_info[view_id] = {
@@ -1269,7 +1297,8 @@ class RenderWorker(QtCore.QObject):
                                 empty_vol = np.array([])
                                 with self._cache_lock:
                                     self._volume_cache.set(volume_key, empty_vol)
-                                handle_volume(view_id, empty_vol, False)
+                                t1 = time.perf_counter()
+                                handle_volume(view_id, empty_vol, False, t0, t1)
                                 continue
                             self.log_line.emit(
                                 _log_event(
@@ -1294,6 +1323,7 @@ class RenderWorker(QtCore.QObject):
                             orbital_id,
                         )
                         futures[future] = volume_key
+                        future_start_times[future] = t0
 
                     for future in as_completed(futures):
                         if self._cancel_event.is_set():
@@ -1310,7 +1340,9 @@ class RenderWorker(QtCore.QObject):
                             vol = np.array([])
                         with self._cache_lock:
                             self._volume_cache.set(volume_key, vol)
-                        handle_volume(view_id, vol, False)
+                        t0 = future_start_times.get(future, time.perf_counter())
+                        t1 = time.perf_counter()
+                        handle_volume(view_id, vol, False, t0, t1)
                 finally:
                     if self._cancel_event.is_set():
                         for future in futures:
