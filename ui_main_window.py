@@ -257,6 +257,7 @@ _TRANSVERSE_COEFFS, _TRANSVERSE_POW_X, _TRANSVERSE_POW_Y, _TRANSVERSE_TERM_COUNT
 
 _VIEW_AXIS = {"X": 0, "Y": 1, "Z": 2, "W": 3}
 _INTEGRAL_GRID_CACHE: dict[tuple[int, float], tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]] = {}
+PRIMARY_VIEW = "X"
 
 
 @njit(parallel=True)
@@ -1079,6 +1080,7 @@ class RenderWorker(QtCore.QObject):
         rotation = np.ascontiguousarray(rotation, dtype=np.float64)
         view_ids = ["X", "Y", "Z", "W"]
         view_index = {view_id: idx for idx, view_id in enumerate(view_ids, start=1)}
+        priority_view = self._params.get("priority_view", PRIMARY_VIEW)
 
         def handle_volume(
             view_id: str,
@@ -1350,14 +1352,143 @@ class RenderWorker(QtCore.QObject):
                 t1 = time.perf_counter()
                 handle_volume(view_id, vol, volume_hit, t0, t1)
         else:
-            futures = {}
-            future_start_times: dict[object, float] = {}
             nodes, weights = np.polynomial.legendre.leggauss(samples)
             nodes = nodes * extent
             weights = weights * extent
+            remaining_views = [vid for vid in view_ids if vid != priority_view]
+            if mode_key in {"integral_strict", "integral_abs", "max_abs"} and remaining_views:
+                self.log_line.emit(
+                    f"perf_priority: primary={priority_view} deferred={remaining_views}"
+                )
+
+            def run_view_inline(view_id: str) -> bool:
+                if self._cancel_event.is_set():
+                    return False
+                t0 = time.perf_counter()
+                volume_key = _volume_cache_key(
+                    orbital_id,
+                    mode_key,
+                    self._params["angles"],
+                    resolution,
+                    samples,
+                    extent,
+                    view_id,
+                )
+                with self._cache_lock:
+                    volume_hit, cached_vol = self._volume_cache.get_with_hit(volume_key)
+                if volume_hit:
+                    t1 = time.perf_counter()
+                    handle_volume(view_id, cached_vol, True, t0, t1, None)
+                    return True
+                if mode_key == "integral_strict":
+                    precheck = _precheck_strict_integral(
+                        view_id,
+                        resolution,
+                        extent,
+                        rotation,
+                        orbital_id,
+                    )
+                    abs_max = precheck["abs_max"]
+                    strict_max = precheck["strict_max"]
+                    ratio = (strict_max / abs_max) if abs_max > 0 else 0.0
+                    if abs_max <= 0.0:
+                        strict_early_empty_info[view_id] = {
+                            "strict_max": strict_max,
+                            "abs_max": abs_max,
+                            "ratio": ratio,
+                            "extent": extent,
+                            "reason": "strict-empty-abs-zero",
+                        }
+                        self.log_line.emit(
+                            _log_event(
+                                "strict_empty",
+                                orbital_id=orbital_id,
+                                mode_key=mode_key,
+                                view_id=view_id,
+                                strict_max=f"{strict_max:.3e}",
+                                abs_max=f"{abs_max:.3e}",
+                                ratio=f"{ratio:.3e}",
+                                samples_pre=STRICT_PRECHECK_SAMPLES,
+                            )
+                        )
+                        empty_vol = np.array([])
+                        with self._cache_lock:
+                            self._volume_cache.set(volume_key, empty_vol)
+                        t1 = time.perf_counter()
+                        handle_volume(view_id, empty_vol, False, t0, t1)
+                        return True
+                    if ratio < STRICT_CANCEL_RATIO and strict_max < STRICT_MAX_CAP:
+                        strict_early_empty_info[view_id] = {
+                            "strict_max": strict_max,
+                            "abs_max": abs_max,
+                            "ratio": ratio,
+                            "extent": extent,
+                            "reason": "strict-empty-precheck",
+                        }
+                        self.log_line.emit(
+                            _log_event(
+                                "strict_empty",
+                                orbital_id=orbital_id,
+                                mode_key=mode_key,
+                                view_id=view_id,
+                                strict_max=f"{strict_max:.3e}",
+                                abs_max=f"{abs_max:.3e}",
+                                ratio=f"{ratio:.3e}",
+                                samples_pre=STRICT_PRECHECK_SAMPLES,
+                            )
+                        )
+                        empty_vol = np.array([])
+                        with self._cache_lock:
+                            self._volume_cache.set(volume_key, empty_vol)
+                        t1 = time.perf_counter()
+                        handle_volume(view_id, empty_vol, False, t0, t1)
+                        return True
+                    self.log_line.emit(
+                        _log_event(
+                            "strict_not_empty",
+                            orbital_id=orbital_id,
+                            mode_key=mode_key,
+                            view_id=view_id,
+                            strict_max=f"{strict_max:.3e}",
+                            abs_max=f"{abs_max:.3e}",
+                            ratio=f"{ratio:.3e}",
+                            samples_pre=STRICT_PRECHECK_SAMPLES,
+                        )
+                    )
+                vol, breakdown = _compute_integral_volume_vectorized(
+                    view_id,
+                    resolution,
+                    extent,
+                    rotation,
+                    nodes,
+                    weights,
+                    mode_key,
+                    orbital_id,
+                )
+                if vol.size and not np.isfinite(vol).all():
+                    vol = np.array([])
+                with self._cache_lock:
+                    self._volume_cache.set(volume_key, vol)
+                t1 = time.perf_counter()
+                handle_volume(view_id, vol, False, t0, t1, breakdown)
+                return True
+
+            should_prioritize = (
+                mode_key in {"integral_strict", "integral_abs", "max_abs"}
+                and priority_view in view_ids
+            )
+            if should_prioritize:
+                run_view_inline(priority_view)
+                if self._cancel_event.is_set():
+                    self.finished.emit(self._request_id)
+                    return
+            futures = {}
+            future_start_times: dict[object, float] = {}
             with ProcessPoolExecutor(max_workers=4) as executor:
                 try:
                     for view_id in view_ids:
+                        if should_prioritize and view_id == priority_view:
+                            continue
                         if self._cancel_event.is_set():
                             for future in futures:
                                 future.cancel()
@@ -2095,6 +2226,7 @@ class MainWindow(QtWidgets.QMainWindow):
             "quality_label": quality_label,
             "allow_mesh": allow_mesh,
             "request_time": request_time,
+            "priority_view": PRIMARY_VIEW,
         }
 
         reason_map = {
