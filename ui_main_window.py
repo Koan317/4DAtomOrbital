@@ -1071,6 +1071,7 @@ class RenderWorker(QtCore.QObject):
         extent = self._params["extent"]
         orbital_id = self._params["orbital_id"]
         allow_mesh = self._params.get("allow_mesh", True)
+        request_time = float(self._params.get("request_time", time.perf_counter()))
 
         # Logging intentionally minimal; strict-empty decisions are logged separately.
 
@@ -1198,6 +1199,9 @@ class RenderWorker(QtCore.QObject):
             total_ms = (t2 - t0) * 1000
             psi_eval_ms = breakdown.get("psi_eval_ms", 0.0) if breakdown else 0.0
             reduce_ms = breakdown.get("reduce_ms", 0.0) if breakdown else 0.0
+            breakdown_total = breakdown.get("total_vol_ms", 0.0) if breakdown else 0.0
+            compute_ms = breakdown_total + mesh_ms
+            queue_wait_ms = (t0 - request_time) * 1000
             self.log_line.emit(
                 "perf: "
                 f"req={self._request_id} "
@@ -1285,6 +1289,9 @@ class RenderWorker(QtCore.QObject):
                 "strict_empty_reason": strict_empty_reason,
                 "clipped": clipped,
                 "shell_max": shell_max,
+                "queue_wait_ms": queue_wait_ms,
+                "compute_ms": compute_ms,
+                "compute_done_ts": t2,
             }
             self.log_line.emit(
                 _log_event(
@@ -2076,6 +2083,7 @@ class MainWindow(QtWidgets.QMainWindow):
             resolution,
             samples,
         )
+        request_time = time.perf_counter()
         params = {
             "orbital_id": orbital.orbital_id,
             "mode_label": self.state.projection_mode,
@@ -2086,6 +2094,7 @@ class MainWindow(QtWidgets.QMainWindow):
             "extent": extent,
             "quality_label": quality_label,
             "allow_mesh": allow_mesh,
+            "request_time": request_time,
         }
 
         reason_map = {
@@ -2222,6 +2231,23 @@ class MainWindow(QtWidgets.QMainWindow):
                     quality=quality_label,
                 )
             )
+        compute_done_ts = info.get("compute_done_ts")
+        post_ms = (time.perf_counter() - compute_done_ts) * 1000 if compute_done_ts else 0.0
+        queue_wait_ms = float(info.get("queue_wait_ms", 0.0))
+        compute_ms = float(info.get("compute_ms", 0.0))
+        total_ms = queue_wait_ms + compute_ms + post_ms
+        self._append_log(
+            "perf2: "
+            f"req={request_id} "
+            f"view={view_id} "
+            f"mode={info.get('mode_key')} "
+            f"res={info.get('resolution')} "
+            f"samples={info.get('samples')} "
+            f"queue_wait_ms={queue_wait_ms:.2f} "
+            f"compute_ms={compute_ms:.2f} "
+            f"post_ms={post_ms:.2f} "
+            f"total_ms={total_ms:.2f}"
+        )
 
     def _on_render_finished(self, request_id: int) -> None:
         if request_id != self._active_request_id:
