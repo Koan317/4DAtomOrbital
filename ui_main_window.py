@@ -791,7 +791,6 @@ def run_selftest(fast: bool = False) -> int:
     available_orbitals = set(list_orbital_ids(include_demo=True))
     errors: list[dict] = []
     total_cases = 0
-    pass_cases = 0
     epsilon = 1e-10
 
     for orbital_id in requested_orbitals:
@@ -928,9 +927,7 @@ def run_selftest(fast: bool = False) -> int:
                             mesh_neg, _ = _extract_mesh(vol, -iso_value, extent)
                         _ = mesh_pos, mesh_neg
 
-                    pass_cases += 1
-
-    print(f"selftest: cases={total_cases}, pass={pass_cases}, errors={len(errors)}")
+    print(f"selftest: cases={total_cases}, errors={len(errors)}")
     if errors:
         first = errors[0]
         metrics = first.get("metrics", {})

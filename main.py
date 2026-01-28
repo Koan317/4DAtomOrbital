@@ -18,9 +18,11 @@ def main() -> None:
     parser.add_argument(
         "--selftest-fast",
         action="store_true",
-        help="Run a smaller subset of the self-test harness.",
+        help="Run fast selftest subset and exit.",
     )
-    args, _ = parser.parse_known_args()
+    args, unknown = parser.parse_known_args()
+    if unknown:
+        print("warning: unknown args ignored:", unknown)
     if args.selftest or args.selftest_fast:
         from ui_main_window import run_selftest
 
