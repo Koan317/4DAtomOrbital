@@ -414,12 +414,16 @@ def _compute_integral_volume_vectorized(
     mode_key: str,
     orbital_id: str,
     chunk_size: int = 8,
-) -> tuple[np.ndarray, float, float]:
+) -> tuple[np.ndarray, dict[str, float]]:
+    total_start = time.perf_counter()
+    grid_start = time.perf_counter()
     _coords, grid_a, grid_b, grid_c = _get_integral_grid(resolution, extent)
+    grid_ms = (time.perf_counter() - grid_start) * 1000
     rotation = np.ascontiguousarray(rotation, dtype=np.float64)
     nodes = np.ascontiguousarray(nodes, dtype=np.float64)
     weights = np.ascontiguousarray(weights, dtype=np.float64)
 
+    axis_start = time.perf_counter()
     if view_id == "X":
         axis_label = "x"
         base_x = None
@@ -436,15 +440,20 @@ def _compute_integral_volume_vectorized(
         axis_label = "w"
         base_w = None
         base_x, base_y, base_z = grid_a, grid_b, grid_c
+    axis_ms = (time.perf_counter() - axis_start) * 1000
 
+    alloc_start = time.perf_counter()
     accumulator = np.zeros_like(grid_a, dtype=np.float64)
     orbital = get_orbital_by_id(orbital_id)
+    alloc_ms = (time.perf_counter() - alloc_start) * 1000
     psi_eval_ms = 0.0
     reduce_ms = 0.0
+    transform_ms = 0.0
     effective_chunk = max(1, min(int(chunk_size), int(nodes.size)))
 
     for start in range(0, nodes.size, effective_chunk):
         end = min(start + effective_chunk, nodes.size)
+        chunk_alloc_start = time.perf_counter()
         t_values = nodes[start:end]
         w_values = weights[start:end]
         t_values = t_values[:, np.newaxis, np.newaxis, np.newaxis]
@@ -469,7 +478,9 @@ def _compute_integral_volume_vectorized(
             y = base_y[np.newaxis, ...]
             z = base_z[np.newaxis, ...]
             w = t_values
+        alloc_ms += (time.perf_counter() - chunk_alloc_start) * 1000
 
+        transform_start = time.perf_counter()
         xr = (
             x * rotation[0, 0]
             + y * rotation[0, 1]
@@ -494,6 +505,7 @@ def _compute_integral_volume_vectorized(
             + z * rotation[3, 2]
             + w * rotation[3, 3]
         )
+        transform_ms += (time.perf_counter() - transform_start) * 1000
 
         psi_start = time.perf_counter()
         psi = orbital.evaluate(xr, yr, zr, wr)
@@ -510,7 +522,17 @@ def _compute_integral_volume_vectorized(
             accumulator = np.maximum(accumulator, np.max(np.abs(psi), axis=0))
         reduce_ms += (time.perf_counter() - reduce_start) * 1000
 
-    return accumulator, psi_eval_ms, reduce_ms
+    total_vol_ms = (time.perf_counter() - total_start) * 1000
+    breakdown = {
+        "grid_ms": grid_ms,
+        "axis_ms": axis_ms,
+        "alloc_ms": alloc_ms,
+        "transform_ms": transform_ms,
+        "psi_eval_ms": psi_eval_ms,
+        "reduce_ms": reduce_ms,
+        "total_vol_ms": total_vol_ms,
+    }
+    return accumulator, breakdown
 
 
 def _compute_integral_volume_task(
@@ -522,8 +544,8 @@ def _compute_integral_volume_task(
     weights: np.ndarray,
     mode_key: str,
     orbital_id: str,
-) -> tuple[str, np.ndarray, float, float]:
-    volume, psi_eval_ms, reduce_ms = _compute_integral_volume_vectorized(
+) -> tuple[str, np.ndarray, dict[str, float]]:
+    volume, breakdown = _compute_integral_volume_vectorized(
         view_id,
         resolution,
         extent,
@@ -533,7 +555,7 @@ def _compute_integral_volume_task(
         mode_key,
         orbital_id,
     )
-    return view_id, volume, psi_eval_ms, reduce_ms
+    return view_id, volume, breakdown
 
 
 def _volume_cache_key(
@@ -613,7 +635,7 @@ def _generate_integral_volume(
     weights = weights * extent
     if cancel_event is not None and cancel_event.is_set():
         return None
-    volume, _, _ = _compute_integral_volume_vectorized(
+    volume, _ = _compute_integral_volume_vectorized(
         view_id,
         resolution,
         extent,
@@ -663,7 +685,7 @@ def _precheck_strict_integral(
     nodes, weights = np.polynomial.legendre.leggauss(STRICT_PRECHECK_SAMPLES)
     nodes = nodes * extent
     weights = weights * extent
-    vol_pre, _, _ = _compute_integral_volume_vectorized(
+    vol_pre, _ = _compute_integral_volume_vectorized(
         view_id,
         resolution,
         extent,
@@ -674,7 +696,7 @@ def _precheck_strict_integral(
         orbital_id,
         chunk_size=STRICT_PRECHECK_SAMPLES,
     )
-    vol_abs_pre, _, _ = _compute_integral_volume_vectorized(
+    vol_abs_pre, _ = _compute_integral_volume_vectorized(
         view_id,
         resolution,
         extent,
@@ -1063,8 +1085,7 @@ class RenderWorker(QtCore.QObject):
             volume_hit: bool,
             t0: float,
             t1: float,
-            psi_eval_ms: float = 0.0,
-            reduce_ms: float = 0.0,
+            breakdown: dict[str, float] | None = None,
         ) -> None:
             if self._cancel_event.is_set():
                 return
@@ -1175,6 +1196,8 @@ class RenderWorker(QtCore.QObject):
             vol_ms = (t1 - t0) * 1000
             mesh_ms = (t2 - t1) * 1000
             total_ms = (t2 - t0) * 1000
+            psi_eval_ms = breakdown.get("psi_eval_ms", 0.0) if breakdown else 0.0
+            reduce_ms = breakdown.get("reduce_ms", 0.0) if breakdown else 0.0
             self.log_line.emit(
                 "perf: "
                 f"req={self._request_id} "
@@ -1190,6 +1213,22 @@ class RenderWorker(QtCore.QObject):
                 f"total_ms={total_ms:.2f} "
                 f"mesh_backend={mesh_backend}"
             )
+            if breakdown:
+                self.log_line.emit(
+                    "perf_vol_breakdown: "
+                    f"req={self._request_id} "
+                    f"view={view_id} "
+                    f"mode={mode_key} "
+                    f"res={resolution} "
+                    f"samples={samples} "
+                    f"grid_ms={breakdown.get('grid_ms', 0.0):.2f} "
+                    f"axis_ms={breakdown.get('axis_ms', 0.0):.2f} "
+                    f"alloc_ms={breakdown.get('alloc_ms', 0.0):.2f} "
+                    f"transform_ms={breakdown.get('transform_ms', 0.0):.2f} "
+                    f"psi_eval_ms={breakdown.get('psi_eval_ms', 0.0):.2f} "
+                    f"reduce_ms={breakdown.get('reduce_ms', 0.0):.2f} "
+                    f"total_vol_ms={breakdown.get('total_vol_ms', 0.0):.2f}"
+                )
             if (
                 mode_key in {"integral_strict", "integral_abs"}
                 and orbital_id == "1s(k=0)"
@@ -1332,7 +1371,7 @@ class RenderWorker(QtCore.QObject):
                             volume_hit, cached_vol = self._volume_cache.get_with_hit(volume_key)
                         if volume_hit:
                             t1 = time.perf_counter()
-                            handle_volume(view_id, cached_vol, True, t0, t1, 0.0, 0.0)
+                            handle_volume(view_id, cached_vol, True, t0, t1, None)
                             continue
                         if mode_key == "integral_strict":
                             precheck = _precheck_strict_integral(
@@ -1431,7 +1470,7 @@ class RenderWorker(QtCore.QObject):
                             break
                         volume_key = futures[future]
                         try:
-                            view_id, vol, psi_eval_ms, reduce_ms = future.result()
+                            view_id, vol, breakdown = future.result()
                         except Exception:
                             continue
                         if vol.size and not np.isfinite(vol).all():
@@ -1440,7 +1479,7 @@ class RenderWorker(QtCore.QObject):
                             self._volume_cache.set(volume_key, vol)
                         t0 = future_start_times.get(future, time.perf_counter())
                         t1 = time.perf_counter()
-                        handle_volume(view_id, vol, False, t0, t1, psi_eval_ms, reduce_ms)
+                        handle_volume(view_id, vol, False, t0, t1, breakdown)
                 finally:
                     if self._cancel_event.is_set():
                         for future in futures:
