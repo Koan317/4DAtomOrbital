@@ -63,3 +63,7 @@ def mode_key_from_ui_label(label_zh: str) -> str:
 
 def ui_label_from_mode_key(mode_key: str) -> str:
     return MODE_LABEL_MAP.get(mode_key, "切片（快速）")
+
+
+def list_mode_keys() -> list[str]:
+    return list(MODE_KEY_MAP.values())

@@ -125,6 +125,10 @@ def list_orbitals(include_demo: bool = True) -> list[Orbital]:
     return list(ORBITALS)
 
 
+def list_orbital_ids(include_demo: bool = True) -> list[str]:
+    return [orb.orbital_id for orb in list_orbitals(include_demo=include_demo)]
+
+
 def get_orbital_manifest(include_demo: bool = True) -> list[dict]:
     orbitals = list_orbitals(include_demo=include_demo)
     ids = [orb.orbital_id for orb in orbitals]

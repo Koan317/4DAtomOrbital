@@ -43,11 +43,12 @@ except ImportError:  # pragma: no cover - used for headless selftest
 
 from skimage import measure
 
-from app_state import AppState, MODE_KEY_MAP, mode_key_from_ui_label
+from app_state import AppState, MODE_KEY_MAP, list_mode_keys, mode_key_from_ui_label
 from orbitals import (
     DEMO_ORBITAL,
     get_orbital_by_id,
     get_orbital_manifest,
+    list_orbital_ids,
     list_orbitals,
     run_orbital_self_check,
 )
@@ -744,94 +745,204 @@ def calibrate_extents(
     return table
 
 
-def run_selftest() -> int:
+def _selftest_rotations(seed: int, count: int) -> list[dict[str, float]]:
+    rng = np.random.default_rng(seed)
+    return [
+        {
+            "xy": float(rng.uniform(0, 360)),
+            "xz": float(rng.uniform(0, 360)),
+            "xw": float(rng.uniform(0, 360)),
+            "yz": float(rng.uniform(0, 360)),
+            "yw": float(rng.uniform(0, 360)),
+            "zw": float(rng.uniform(0, 360)),
+        }
+        for _ in range(count)
+    ]
+
+
+def _selftest_orbitals(fast: bool) -> list[str]:
+    if fast:
+        return ["1s(k=0)", "2p(k=0)", "3d(k=0)", "4f(k=0)"]
+    return [
+        "1s(k=0)",
+        "2p(k=0)",
+        "2p(k=1)",
+        "3d(k=0)",
+        "3d(k=1)",
+        "3d(k=2)",
+        "4f(k=0)",
+    ]
+
+
+def run_selftest(fast: bool = False) -> int:
     loaded, _ = _load_extent_table()
     if loaded is not None:
         EXTENT_TABLE.clear()
         EXTENT_TABLE.update(loaded)
 
-    manifest = get_orbital_manifest(include_demo=True)
-    mode_keys = list(MODE_KEY_MAP.values())
+    mode_keys = list_mode_keys()
     view_ids = ["X", "Y", "Z", "W"]
-    rotation = np.eye(4, dtype=np.float64)
-    resolution = 16
-    samples = 8
-    nodes, weights = np.polynomial.legendre.leggauss(samples)
-    errors: list[str] = []
+    resolution = 24 if fast else 32
+    samples = 6 if fast else 8
+    rotations = _selftest_rotations(seed=42, count=2 if fast else 8)
+    requested_orbitals = _selftest_orbitals(fast=fast)
+    available_orbitals = set(list_orbital_ids(include_demo=True))
+    errors: list[dict] = []
     total_cases = 0
+    pass_cases = 0
+    epsilon = 1e-10
 
-    for entry in manifest:
-        orbital_id = entry["id"]
+    for orbital_id in requested_orbitals:
+        if orbital_id not in available_orbitals:
+            errors.append(
+                {
+                    "error": "missing orbital_id",
+                    "orbital_id": orbital_id,
+                }
+            )
+            continue
         for mode_key in mode_keys:
             extent = EXTENT_TABLE.get((orbital_id, mode_key))
             if extent is None:
-                errors.append(f"missing extent_table entry: {orbital_id}|{mode_key}")
+                errors.append(
+                    {
+                        "error": "missing extent_table entry",
+                        "orbital_id": orbital_id,
+                        "mode_key": mode_key,
+                    }
+                )
                 continue
             coords = np.linspace(-extent, extent, resolution, dtype=np.float64)
-            for view_id in view_ids:
-                total_cases += 1
-                strict_empty = False
-                if mode_key == "slice":
-                    vol = _generate_slice_volume(view_id, resolution, extent, rotation, orbital_id)
-                elif mode_key == "integral_strict":
-                    precheck = _precheck_strict_integral(
-                        view_id, resolution, extent, rotation, orbital_id
-                    )
-                    abs_max = precheck["abs_max"]
-                    strict_max = precheck["strict_max"]
-                    ratio = (strict_max / abs_max) if abs_max > 0 else 0.0
-                    if abs_max <= 0.0 or (
-                        ratio < STRICT_CANCEL_RATIO and strict_max < STRICT_MAX_CAP
-                    ):
-                        vol = np.array([])
-                        strict_empty = True
+            nodes, weights = np.polynomial.legendre.leggauss(samples)
+            nodes = nodes * extent
+            weights = weights * extent
+
+            for angles in rotations:
+                rotation = _compose_rotation_matrix_from_angles(angles)
+                for view_id in view_ids:
+                    total_cases += 1
+                    strict_empty = False
+                    strict_info = {}
+                    vol = np.array([])
+                    if mode_key == "slice":
+                        vol = _generate_slice_volume(
+                            view_id, resolution, extent, rotation, orbital_id
+                        )
+                    elif mode_key == "integral_strict":
+                        precheck = _precheck_strict_integral(
+                            view_id, resolution, extent, rotation, orbital_id
+                        )
+                        abs_max = precheck["abs_max"]
+                        strict_max = precheck["strict_max"]
+                        ratio = (strict_max / abs_max) if abs_max > 0 else 0.0
+                        strict_info = {
+                            "strict_max": strict_max,
+                            "abs_max": abs_max,
+                            "ratio": ratio,
+                        }
+                        if abs_max <= 0.0 or (
+                            ratio < STRICT_CANCEL_RATIO and strict_max < STRICT_MAX_CAP
+                        ):
+                            strict_empty = True
+                            print(
+                                _log_event(
+                                    "strict_empty",
+                                    orbital_id=orbital_id,
+                                    mode_key=mode_key,
+                                    view_id=view_id,
+                                    strict_max=f"{strict_max:.3e}",
+                                    abs_max=f"{abs_max:.3e}",
+                                    ratio=f"{ratio:.3e}",
+                                )
+                            )
+                        else:
+                            vol = _integral_volume_kernel(
+                                _VIEW_AXIS[view_id],
+                                coords,
+                                nodes,
+                                weights,
+                                rotation,
+                                _ORBITAL_INDEX.get(orbital_id, 0),
+                                0,
+                            )
                     else:
+                        mode_flag = 1 if mode_key == "integral_abs" else 2
                         vol = _integral_volume_kernel(
                             _VIEW_AXIS[view_id],
                             coords,
-                            nodes * extent,
-                            weights * extent,
+                            nodes,
+                            weights,
                             rotation,
                             _ORBITAL_INDEX.get(orbital_id, 0),
-                            0,
+                            mode_flag,
                         )
-                else:
-                    mode_flag = 1 if mode_key == "integral_abs" else 2
-                    vol = _integral_volume_kernel(
-                        _VIEW_AXIS[view_id],
-                        coords,
-                        nodes * extent,
-                        weights * extent,
-                        rotation,
-                        _ORBITAL_INDEX.get(orbital_id, 0),
-                        mode_flag,
-                    )
 
-                if vol.size and not np.isfinite(vol).all():
-                    errors.append(f"non-finite volume: {orbital_id}|{mode_key}|{view_id}")
-                    continue
+                    if strict_empty and orbital_id == "1s(k=0)" and mode_key == "integral_strict":
+                        errors.append(
+                            {
+                                "error": "strict_empty_not_allowed",
+                                "orbital_id": orbital_id,
+                                "mode_key": mode_key,
+                                "view_id": view_id,
+                                "angles": angles,
+                                "metrics": strict_info,
+                            }
+                        )
+                        continue
 
-                max_abs = float(np.max(np.abs(vol))) if vol.size else 0.0
-                iso_value = (ISO_PERCENT_FIXED / 100.0) * max_abs if max_abs > 0 else 0.0
-                mesh_pos = None
-                mesh_neg = None
-                if iso_value > 0 and vol.size:
-                    mesh_pos, _ = _extract_mesh(vol, iso_value, extent)
-                    if mode_key in {"slice", "integral_strict"}:
-                        mesh_neg, _ = _extract_mesh(vol, -iso_value, extent)
-                has_mesh = (mesh_pos is not None) or (mesh_neg is not None)
-                overlay_visible = not has_mesh
-                if not has_mesh and not overlay_visible:
-                    errors.append(f"overlay mismatch: {orbital_id}|{mode_key}|{view_id}")
-                if strict_empty and has_mesh:
-                    errors.append(f"strict-empty produced mesh: {orbital_id}|{mode_key}|{view_id}")
-                if mode_key in {"integral_abs", "max_abs"} and mesh_neg is not None:
-                    errors.append(f"negative mesh present for non-negative mode: {orbital_id}|{mode_key}|{view_id}")
+                    if vol.size and not np.isfinite(vol).all():
+                        errors.append(
+                            {
+                                "error": "non-finite volume",
+                                "orbital_id": orbital_id,
+                                "mode_key": mode_key,
+                                "view_id": view_id,
+                                "angles": angles,
+                            }
+                        )
+                        continue
 
-    print(f"selftest: cases={total_cases}, errors={len(errors)}")
+                    if mode_key in {"integral_abs", "max_abs"} and vol.size:
+                        min_val = float(np.min(vol))
+                        if min_val < -epsilon:
+                            errors.append(
+                                {
+                                    "error": "negative value in non-negative mode",
+                                    "orbital_id": orbital_id,
+                                    "mode_key": mode_key,
+                                    "view_id": view_id,
+                                    "angles": angles,
+                                    "metrics": {"min": min_val},
+                                }
+                            )
+                            continue
+
+                    max_abs = float(np.max(np.abs(vol))) if vol.size else 0.0
+                    iso_value = (ISO_PERCENT_FIXED / 100.0) * max_abs if max_abs > 0 else 0.0
+                    if max_abs > 0 and not strict_empty:
+                        mesh_pos, _ = _extract_mesh(vol, iso_value, extent)
+                        mesh_neg = None
+                        if mode_key in {"slice", "integral_strict"}:
+                            mesh_neg, _ = _extract_mesh(vol, -iso_value, extent)
+                        _ = mesh_pos, mesh_neg
+
+                    pass_cases += 1
+
+    print(f"selftest: cases={total_cases}, pass={pass_cases}, errors={len(errors)}")
     if errors:
-        for err in errors[:10]:
-            print(f"selftest_error: {err}")
+        first = errors[0]
+        metrics = first.get("metrics", {})
+        print(
+            _log_event(
+                "selftest_failure",
+                error=first.get("error"),
+                orbital_id=first.get("orbital_id"),
+                mode_key=first.get("mode_key"),
+                view_id=first.get("view_id"),
+                angles=first.get("angles"),
+                metrics=metrics,
+            )
+        )
         return 1
     return 0
 
@@ -1295,6 +1406,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._shutting_down = False
         self._extent_retry_request_id: int | None = None
         self._extent_retry_attempted = False
+        self._last_extent_log: tuple[str, str, float] | None = None
 
         self._build_status_bar()
         self._build_central()
@@ -1512,6 +1624,14 @@ class MainWindow(QtWidgets.QMainWindow):
         self.log_panel = QtWidgets.QPlainTextEdit()
         self.log_panel.setReadOnly(True)
         self.log_panel.setPlaceholderText("界面事件日志...")
+        log_header = QtWidgets.QHBoxLayout()
+        log_header.addWidget(QtWidgets.QLabel("日志"))
+        log_header.addStretch()
+        self.log_clear_button = QtWidgets.QToolButton()
+        self.log_clear_button.setText("清空日志")
+        self.log_clear_button.clicked.connect(self._clear_log_panel)
+        log_header.addWidget(self.log_clear_button)
+        layout.addLayout(log_header)
         layout.addWidget(self.log_panel, 1)
 
         return panel
@@ -1769,14 +1889,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.state.extent_effective = extent
         for view in self.projection_views.values():
             view.set_extent(extent)
-        self._append_log(
-            _log_event(
-                "extent_used",
-                orbital_id=orbital.orbital_id,
-                mode_key=mode_key,
-                extent=round(extent, 2),
-            )
-        )
+        self._log_extent_used(orbital.orbital_id, mode_key, extent)
         allow_mesh = True
         if mode_key != "slice" and quality_label == "预览":
             now = time.perf_counter()
@@ -1831,6 +1944,23 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _append_log(self, message: str) -> None:
         self.log_panel.appendPlainText(message)
+
+    def _clear_log_panel(self) -> None:
+        self.log_panel.clear()
+
+    def _log_extent_used(self, orbital_id: str, mode_key: str, extent: float) -> None:
+        entry = (orbital_id, mode_key, round(extent, 2))
+        if entry == self._last_extent_log:
+            return
+        self._last_extent_log = entry
+        self._append_log(
+            _log_event(
+                "extent_used",
+                orbital_id=orbital_id,
+                mode_key=mode_key,
+                extent=entry[2],
+            )
+        )
 
     def _on_view_ready(
         self,
