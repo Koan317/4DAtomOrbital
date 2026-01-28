@@ -82,7 +82,6 @@ class ProjectionViewWidget(QtWidgets.QWidget):
         self._extent = extent
         self._mesh_actors: dict[str, pv.Actor] = {}
         self._camera_initialized = False
-        self._empty_overlay_visible = False
 
         layout = QtWidgets.QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -100,17 +99,17 @@ class ProjectionViewWidget(QtWidgets.QWidget):
         container_layout.setContentsMargins(0, 0, 0, 0)
         container_layout.addWidget(self.plotter, 0, 0)
 
-        self._empty_overlay = QtWidgets.QLabel("无函数值，展示为空")
-        self._empty_overlay.setAlignment(
+        self._overlay_label = QtWidgets.QLabel("无函数值，展示为空")
+        self._overlay_label.setAlignment(
             QtCore.Qt.AlignmentFlag.AlignCenter
         )
-        self._empty_overlay.setStyleSheet(
+        self._overlay_label.setStyleSheet(
             "color: #e0e0e0; background-color: rgba(0, 0, 0, 140); "
             "padding: 6px; border-radius: 6px;"
         )
-        self._empty_overlay.setAttribute(QtCore.Qt.WidgetAttribute.WA_TransparentForMouseEvents)
-        self._empty_overlay.setVisible(False)
-        container_layout.addWidget(self._empty_overlay, 0, 0, QtCore.Qt.AlignmentFlag.AlignCenter)
+        self._overlay_label.setAttribute(QtCore.Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        self._overlay_label.setVisible(False)
+        container_layout.addWidget(self._overlay_label, 0, 0, QtCore.Qt.AlignmentFlag.AlignCenter)
 
         layout.addWidget(self._view_container, 1)
 
@@ -144,21 +143,38 @@ class ProjectionViewWidget(QtWidgets.QWidget):
             self.plotter.reset_camera()
             self.plotter.reset_camera_clipping_range()
             self._camera_initialized = True
-        self.set_empty_message_visible(not has_mesh)
+        if has_mesh:
+            self.set_overlay(None)
+        else:
+            self.set_overlay("无函数值，展示为空")
         if self.isVisible():
             self.plotter.render()
 
     def set_empty_overlay(self, visible: bool) -> None:
-        self.set_empty_message_visible(visible)
+        if visible:
+            self.set_overlay("无函数值，展示为空")
+        else:
+            self.set_overlay(None)
 
     def set_empty_message_visible(self, visible: bool) -> None:
-        if self._empty_overlay_visible == visible:
-            return
-        self._empty_overlay_visible = visible
-        self._empty_overlay.setVisible(visible)
+        if visible:
+            self.set_overlay("无函数值，展示为空")
+        else:
+            self.set_overlay(None)
 
     def set_empty_message_text(self, text: str) -> None:
-        self._empty_overlay.setText(text)
+        self.set_overlay(text)
+
+    def set_overlay(self, text: str | None) -> None:
+        if text is None:
+            if not self._overlay_label.isVisible():
+                return
+            self._overlay_label.setVisible(False)
+            return
+        self._overlay_label.setText(text)
+        if self._overlay_label.isVisible():
+            return
+        self._overlay_label.setVisible(True)
 
     def set_extent(self, extent: float) -> None:
         self._extent = extent

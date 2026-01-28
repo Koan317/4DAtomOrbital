@@ -61,7 +61,10 @@ else:  # pragma: no cover - headless selftest
 
 ISO_PERCENT_FIXED = 3.0
 STRICT_PRECHECK_SAMPLES = 8
-STRICT_ISO_ABS_FLOOR = 1e-3
+STRICT_ABS_EPS = 1e-10
+STRICT_MEAN_RATIO = 0.01
+STRICT_Q95_RATIO = 0.05
+STRICT_SHELL_RATIO = 0.05
 
 EXTENT_TABLE = {
     ("1s(k=0)", "slice"): 10.0,
@@ -579,13 +582,33 @@ def _extract_mesh(
     return (verts, faces), ""
 
 
+def _is_strict_cancellation_dominated(
+    max_abs: float,
+    mean_abs: float,
+    q95: float,
+    shell_max: float,
+) -> bool:
+    if max_abs <= STRICT_ABS_EPS:
+        return True
+    if max_abs <= 0:
+        return True
+    mean_ratio = mean_abs / max_abs
+    q95_ratio = q95 / max_abs
+    shell_ratio = shell_max / max_abs
+    return (
+        mean_ratio < STRICT_MEAN_RATIO
+        and q95_ratio < STRICT_Q95_RATIO
+        and shell_ratio < STRICT_SHELL_RATIO
+    )
+
+
 def _precheck_strict_integral(
     view_id: str,
     resolution: int,
     extent: float,
     rotation: np.ndarray,
     orbital_id: str,
-) -> float:
+) -> dict[str, float]:
     coords = np.linspace(-extent, extent, resolution, dtype=np.float64)
     nodes, weights = np.polynomial.legendre.leggauss(STRICT_PRECHECK_SAMPLES)
     nodes = nodes * extent
@@ -602,8 +625,14 @@ def _precheck_strict_integral(
         0,
     )
     if vol_pre.size == 0:
-        return 0.0
-    return float(np.max(np.abs(vol_pre)))
+        return {"max_abs": 0.0, "mean_abs": 0.0, "q95": 0.0, "shell_max": 0.0}
+    abs_vol = np.abs(vol_pre)
+    return {
+        "max_abs": float(np.max(abs_vol)),
+        "mean_abs": float(np.mean(abs_vol)),
+        "q95": float(np.quantile(abs_vol, 0.95)),
+        "shell_max": _boundary_max_abs(vol_pre),
+    }
 
 
 def _boundary_max_abs(vol: np.ndarray) -> float:
@@ -729,11 +758,11 @@ def calibrate_extents(
     return table
 
 
-def run_selftest() -> int:
-    loaded, _ = _load_extent_table()
-    if loaded is not None:
-        EXTENT_TABLE.clear()
-        EXTENT_TABLE.update(loaded)
+    def run_selftest() -> int:
+        loaded, _ = _load_extent_table()
+        if loaded is not None:
+            EXTENT_TABLE.clear()
+            EXTENT_TABLE.update(loaded)
 
     manifest = get_orbital_manifest(include_demo=True)
     mode_keys = list(MODE_KEY_MAP.values())
@@ -759,11 +788,15 @@ def run_selftest() -> int:
                 if mode_key == "slice":
                     vol = _generate_slice_volume(view_id, resolution, extent, rotation, orbital_id)
                 elif mode_key == "integral_strict":
-                    max_abs_pre = _precheck_strict_integral(
+                    precheck = _precheck_strict_integral(
                         view_id, resolution, extent, rotation, orbital_id
                     )
-                    iso_pre = (ISO_PERCENT_FIXED / 100.0) * max_abs_pre
-                    if max_abs_pre <= 0 or iso_pre < STRICT_ISO_ABS_FLOOR:
+                    if _is_strict_cancellation_dominated(
+                        precheck["max_abs"],
+                        precheck["mean_abs"],
+                        precheck["q95"],
+                        precheck["shell_max"],
+                    ):
                         vol = np.array([])
                         strict_empty = True
                     else:
@@ -872,21 +905,27 @@ class RenderWorker(QtCore.QObject):
             strict_cancelled = strict_mode and strict_empty_info is not None
             strict_empty_reason = strict_empty_info.get("reason") if strict_empty_info else ""
 
+            strict_mean_abs = 0.0
+            strict_q95 = 0.0
+            strict_shell_max = 0.0
             if strict_mode and not strict_cancelled and vol.size:
                 abs_vol = np.abs(vol)
-                mean_abs = float(np.mean(abs_vol))
-                q95 = float(np.quantile(abs_vol, 0.95))
-                if max_abs < 1e-10 or (
-                    max_abs > 0
-                    and mean_abs / max_abs < 0.01
-                    and q95 / max_abs < 0.05
+                strict_mean_abs = float(np.mean(abs_vol))
+                strict_q95 = float(np.quantile(abs_vol, 0.95))
+                strict_shell_max = _boundary_max_abs(vol)
+                if _is_strict_cancellation_dominated(
+                    max_abs,
+                    strict_mean_abs,
+                    strict_q95,
+                    strict_shell_max,
                 ):
                     strict_cancelled = True
                     strict_empty_reason = "strict-empty-noise"
                     strict_empty_info = {
                         "max_abs": max_abs,
-                        "mean_abs": mean_abs,
-                        "q95": q95,
+                        "mean_abs": strict_mean_abs,
+                        "q95": strict_q95,
+                        "shell_max": strict_shell_max,
                         "reason": strict_empty_reason,
                     }
                     self.log_line.emit(
@@ -896,8 +935,9 @@ class RenderWorker(QtCore.QObject):
                             mode_key=mode_key,
                             view_id=view_id,
                             max_abs=f"{max_abs:.3e}",
-                            mean_abs=f"{mean_abs:.3e}",
-                            q95=f"{q95:.3e}",
+                            mean_abs=f"{strict_mean_abs:.3e}",
+                            q95=f"{strict_q95:.3e}",
+                            shell_max=f"{strict_shell_max:.3e}",
                         )
                     )
 
@@ -957,6 +997,10 @@ class RenderWorker(QtCore.QObject):
                         clipped = True
 
             view_time_ms = int((time.perf_counter() - view_start) * 1000)
+            pos_verts = mesh_pos[0].shape[0] if isinstance(mesh_pos, tuple) else 0
+            pos_faces = mesh_pos[1].shape[0] if isinstance(mesh_pos, tuple) else 0
+            neg_verts = mesh_neg[0].shape[0] if isinstance(mesh_neg, tuple) else 0
+            neg_faces = mesh_neg[1].shape[0] if isinstance(mesh_neg, tuple) else 0
             info = {
                 "view_index": view_index[view_id],
                 "volume_hit": volume_hit,
@@ -980,6 +1024,26 @@ class RenderWorker(QtCore.QObject):
                 "clipped": clipped,
                 "shell_max": shell_max,
             }
+            self.log_line.emit(
+                _log_event(
+                    "view_debug",
+                    request_id=self._request_id,
+                    view_id=view_id,
+                    mode_key=mode_key,
+                    resolution=resolution,
+                    extent=round(extent, 2),
+                    samples=samples,
+                    max_abs=f"{max_abs:.3e}",
+                    iso_value=f"{iso_value:.3e}",
+                    volume_hit=volume_hit,
+                    mesh_hit_pos=mesh_hit_pos,
+                    mesh_hit_neg=mesh_hit_neg,
+                    pos_verts=pos_verts,
+                    pos_faces=pos_faces,
+                    neg_verts=neg_verts,
+                    neg_faces=neg_faces,
+                )
+            )
             self.view_ready.emit(self._request_id, view_id, mesh_pos, mesh_neg, info)
 
         strict_early_empty_info: dict[str, dict] = {}
@@ -1035,20 +1099,26 @@ class RenderWorker(QtCore.QObject):
                         handle_volume(view_id, cached_vol, True)
                         continue
                     if mode_key == "integral_strict":
-                        max_abs_pre = _precheck_strict_integral(
+                        precheck = _precheck_strict_integral(
                             view_id,
                             resolution,
                             extent,
                             rotation,
                             orbital_id,
                         )
-                        iso_pre = (ISO_PERCENT_FIXED / 100.0) * max_abs_pre
-                        if max_abs_pre <= 0 or iso_pre < STRICT_ISO_ABS_FLOOR:
+                        if _is_strict_cancellation_dominated(
+                            precheck["max_abs"],
+                            precheck["mean_abs"],
+                            precheck["q95"],
+                            precheck["shell_max"],
+                        ):
                             strict_early_empty_info[view_id] = {
-                                "max_abs_pre": max_abs_pre,
-                                "iso_pre": iso_pre,
+                                "max_abs_pre": precheck["max_abs"],
+                                "mean_abs_pre": precheck["mean_abs"],
+                                "q95_pre": precheck["q95"],
+                                "shell_max_pre": precheck["shell_max"],
                                 "extent": extent,
-                                "reason": "strict-empty-floor",
+                                "reason": "strict-empty-precheck",
                             }
                             self.log_line.emit(
                                 _log_event(
@@ -1057,9 +1127,10 @@ class RenderWorker(QtCore.QObject):
                                     mode_key=mode_key,
                                     view_id=view_id,
                                     extent=round(extent, 2),
-                                    max_abs_pre=f"{max_abs_pre:.3e}",
-                                    iso_pre=f"{iso_pre:.3e}",
-                                    floor=f"{STRICT_ISO_ABS_FLOOR:.3e}",
+                                    max_abs_pre=f"{precheck['max_abs']:.3e}",
+                                    mean_abs_pre=f"{precheck['mean_abs']:.3e}",
+                                    q95_pre=f"{precheck['q95']:.3e}",
+                                    shell_max_pre=f"{precheck['shell_max']:.3e}",
                                 )
                             )
                             empty_vol = np.array([])
@@ -1205,6 +1276,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self._build_status_bar()
         self._build_central()
         self._load_extent_table()
+        self._append_log(
+            "复现建议：选择 2p(k=0)，切到 积分 ψ（严格），把某个角度滑到 XX°（用户提供），观察 W 视图是否应为空。"
+        )
 
         self._run_orbital_self_check()
         self._ready = True
@@ -1639,7 +1713,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._extent_retry_request_id = request_id
         self._extent_retry_attempted = reason == "extent-retry"
         self._cancel_event = threading.Event()
-        self._clear_views()
+        self._clear_views("计算中...")
 
         orbital = get_orbital_by_id(self.state.orbital_id)
         mode_key = self.state.projection_mode_key
@@ -1871,7 +1945,10 @@ class MainWindow(QtWidgets.QMainWindow):
     def _snap_resolution(self, target: int) -> int:
         return min(self._allowed_resolutions, key=lambda res: abs(res - target))
 
-    def _clear_views(self) -> None:
+    def _clear_views(self, overlay_text: str | None = None) -> None:
         for view in self.projection_views.values():
             view.set_meshes(None, None, 1.0)
-            view.set_empty_message_visible(False)
+            if overlay_text:
+                view.set_overlay(overlay_text)
+            else:
+                view.set_empty_message_visible(False)
