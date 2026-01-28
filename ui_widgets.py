@@ -3,6 +3,8 @@ from pyvistaqt import QtInteractor
 import numpy as np
 import pyvista as pv
 
+from constants import DEFAULT_EXTENT_BASE, EMPTY_PROJECTION_MESSAGE
+
 
 def build_title_label(text: str) -> QtWidgets.QLabel:
     label = QtWidgets.QLabel(text)
@@ -77,7 +79,7 @@ def build_labeled_slider(
 
 
 class ProjectionViewWidget(QtWidgets.QWidget):
-    def __init__(self, title: str, extent: float = 6.0) -> None:
+    def __init__(self, title: str, extent: float = DEFAULT_EXTENT_BASE) -> None:
         super().__init__()
         self._extent = extent
         self._mesh_actors: dict[str, pv.Actor] = {}
@@ -99,7 +101,7 @@ class ProjectionViewWidget(QtWidgets.QWidget):
         container_layout.setContentsMargins(0, 0, 0, 0)
         container_layout.addWidget(self.plotter, 0, 0)
 
-        self._overlay_label = QtWidgets.QLabel("无函数值，展示为空")
+        self._overlay_label = QtWidgets.QLabel(EMPTY_PROJECTION_MESSAGE)
         self._overlay_label.setAlignment(
             QtCore.Qt.AlignmentFlag.AlignCenter
         )
@@ -146,24 +148,9 @@ class ProjectionViewWidget(QtWidgets.QWidget):
         if has_mesh:
             self.set_overlay(None)
         else:
-            self.set_overlay("无函数值，展示为空")
+            self.set_overlay(EMPTY_PROJECTION_MESSAGE)
         if self.isVisible():
             self.plotter.render()
-
-    def set_empty_overlay(self, visible: bool) -> None:
-        if visible:
-            self.set_overlay("无函数值，展示为空")
-        else:
-            self.set_overlay(None)
-
-    def set_empty_message_visible(self, visible: bool) -> None:
-        if visible:
-            self.set_overlay("无函数值，展示为空")
-        else:
-            self.set_overlay(None)
-
-    def set_empty_message_text(self, text: str) -> None:
-        self.set_overlay(text)
 
     def set_overlay(self, text: str | None) -> None:
         if text is None:

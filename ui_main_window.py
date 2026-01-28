@@ -44,6 +44,19 @@ except ImportError:  # pragma: no cover - used for headless selftest
 from skimage import measure
 
 from app_state import AppState, MODE_KEY_MAP, list_mode_keys, mode_key_from_ui_label
+from constants import (
+    ALLOWED_RESOLUTIONS,
+    DEFAULT_EXTENT_EFFECTIVE,
+    DEFAULT_EXTENT_BASE,
+    EXTENT_TABLE_PATH,
+    ISO_ABS_EPS,
+    ISO_PERCENT_FIXED,
+    STRICT_ABS_EPS,
+    STRICT_CANCEL_RATIO,
+    STRICT_MAX_CAP,
+    STRICT_PRECHECK_SAMPLES,
+    VOLUME_ABS_EPS,
+)
 from orbitals import (
     DEMO_ORBITAL,
     get_orbital_by_id,
@@ -59,14 +72,6 @@ else:  # pragma: no cover - headless selftest
     build_labeled_slider = None
     build_title_label = None
 
-
-ISO_PERCENT_FIXED = 3.0
-STRICT_PRECHECK_SAMPLES = 8
-STRICT_ABS_EPS = 1e-10
-STRICT_CANCEL_RATIO = 0.02
-STRICT_MAX_CAP = 1e-6
-VOLUME_ABS_EPS = 1e-10
-ISO_ABS_EPS = 1e-12
 
 EXTENT_TABLE = {
     ("1s(k=0)", "slice"): 10.0,
@@ -187,7 +192,7 @@ EXTENT_TABLE = {
     ("演示/假场 (Debug)", "max_abs"): 10.0,
 }
 
-_EXTENT_TABLE_PATH = "extent_table.json"
+_EXTENT_TABLE_PATH = EXTENT_TABLE_PATH
 
 
 def _log_event(event: str, **fields: object) -> str:
@@ -431,14 +436,11 @@ def _mesh_cache_key(volume_key: tuple, iso_value: float, sign: int) -> tuple:
 
 
 def _compose_rotation_matrix_from_angles(angles: dict) -> np.ndarray:
-    return (
-        _rotation_matrix_zw(angles["zw"])
-        @ _rotation_matrix_yw(angles["yw"])
-        @ _rotation_matrix_yz(angles["yz"])
-        @ _rotation_matrix_xw(angles["xw"])
-        @ _rotation_matrix_xz(angles["xz"])
-        @ _rotation_matrix_xy(angles["xy"])
-    )
+    mat = np.eye(4, dtype=np.float64)
+    for key in _ROTATION_ORDER:
+        axis_a, axis_b = _ROTATION_PLANES[key]
+        mat = _rotation_matrix_for_plane(axis_a, axis_b, angles[key]) @ mat
+    return mat
 
 
 def _generate_slice_volume(
@@ -682,7 +684,7 @@ def calibrate_extents(
     n_pre: int = 32,
     m_pre: int = 10,
     max_iter: int = 6,
-    base_extent: float = 6.0,
+    base_extent: float = DEFAULT_EXTENT_BASE,
 ) -> dict[tuple[str, str], float]:
     rng = np.random.default_rng(seed)
     orbitals = [orb for orb in list_orbitals(include_demo=True) if orb.display_name != DEMO_ORBITAL.display_name]
@@ -1319,75 +1321,27 @@ class RenderWorker(QtCore.QObject):
         self.finished.emit(self._request_id)
 
 
-def _rotation_matrix_xy(theta_deg: float) -> np.ndarray:
+_ROTATION_PLANES = {
+    "xy": (0, 1),
+    "xz": (0, 2),
+    "xw": (0, 3),
+    "yz": (1, 2),
+    "yw": (1, 3),
+    "zw": (2, 3),
+}
+
+_ROTATION_ORDER = ("zw", "yw", "yz", "xw", "xz", "xy")
+
+
+def _rotation_matrix_for_plane(axis_a: int, axis_b: int, theta_deg: float) -> np.ndarray:
     theta = np.deg2rad(theta_deg)
     c = np.cos(theta)
     s = np.sin(theta)
     mat = np.eye(4, dtype=np.float64)
-    mat[0, 0] = c
-    mat[0, 1] = -s
-    mat[1, 0] = s
-    mat[1, 1] = c
-    return mat
-
-
-def _rotation_matrix_xz(theta_deg: float) -> np.ndarray:
-    theta = np.deg2rad(theta_deg)
-    c = np.cos(theta)
-    s = np.sin(theta)
-    mat = np.eye(4, dtype=np.float64)
-    mat[0, 0] = c
-    mat[0, 2] = -s
-    mat[2, 0] = s
-    mat[2, 2] = c
-    return mat
-
-
-def _rotation_matrix_xw(theta_deg: float) -> np.ndarray:
-    theta = np.deg2rad(theta_deg)
-    c = np.cos(theta)
-    s = np.sin(theta)
-    mat = np.eye(4, dtype=np.float64)
-    mat[0, 0] = c
-    mat[0, 3] = -s
-    mat[3, 0] = s
-    mat[3, 3] = c
-    return mat
-
-
-def _rotation_matrix_yz(theta_deg: float) -> np.ndarray:
-    theta = np.deg2rad(theta_deg)
-    c = np.cos(theta)
-    s = np.sin(theta)
-    mat = np.eye(4, dtype=np.float64)
-    mat[1, 1] = c
-    mat[1, 2] = -s
-    mat[2, 1] = s
-    mat[2, 2] = c
-    return mat
-
-
-def _rotation_matrix_yw(theta_deg: float) -> np.ndarray:
-    theta = np.deg2rad(theta_deg)
-    c = np.cos(theta)
-    s = np.sin(theta)
-    mat = np.eye(4, dtype=np.float64)
-    mat[1, 1] = c
-    mat[1, 3] = -s
-    mat[3, 1] = s
-    mat[3, 3] = c
-    return mat
-
-
-def _rotation_matrix_zw(theta_deg: float) -> np.ndarray:
-    theta = np.deg2rad(theta_deg)
-    c = np.cos(theta)
-    s = np.sin(theta)
-    mat = np.eye(4, dtype=np.float64)
-    mat[2, 2] = c
-    mat[2, 3] = -s
-    mat[3, 2] = s
-    mat[3, 3] = c
+    mat[axis_a, axis_a] = c
+    mat[axis_a, axis_b] = -s
+    mat[axis_b, axis_a] = s
+    mat[axis_b, axis_b] = c
     return mat
 
 
@@ -1400,8 +1354,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.state = AppState()
         self._ready = False
         self._dx_target = 0.25
-        self._allowed_resolutions = [64, 96, 128, 160]
-        self._extent = 10.0
+        self._allowed_resolutions = list(ALLOWED_RESOLUTIONS)
+        self._extent = DEFAULT_EXTENT_EFFECTIVE
         self.state.extent_effective = self._extent
         self._last_mesh_time = 0.0
         self._mesh_throttle_s = 0.3
@@ -2176,4 +2130,4 @@ class MainWindow(QtWidgets.QMainWindow):
             if overlay_text:
                 view.set_overlay(overlay_text)
             else:
-                view.set_empty_message_visible(False)
+                view.set_overlay(None)
