@@ -256,6 +256,8 @@ _TRANSVERSE_COEFFS, _TRANSVERSE_POW_X, _TRANSVERSE_POW_Y, _TRANSVERSE_TERM_COUNT
 )
 
 _VIEW_AXIS = {"X": 0, "Y": 1, "Z": 2, "W": 3}
+_INTEGRAL_GRID_CACHE: dict[tuple[int, float], tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]] = {}
+PRIMARY_VIEW = "X"
 
 
 @njit(parallel=True)
@@ -389,32 +391,172 @@ def _integral_volume_kernel(
     return out.reshape((n, n, n))
 
 
+def _get_integral_grid(
+    resolution: int,
+    extent: float,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    key = (resolution, round(float(extent), 6))
+    cached = _INTEGRAL_GRID_CACHE.get(key)
+    if cached is not None:
+        return cached
+    coords = np.linspace(-extent, extent, resolution, dtype=np.float64)
+    grid_a, grid_b, grid_c = np.meshgrid(coords, coords, coords, indexing="ij")
+    _INTEGRAL_GRID_CACHE[key] = (coords, grid_a, grid_b, grid_c)
+    return coords, grid_a, grid_b, grid_c
+
+
+def _compute_integral_volume_vectorized(
+    view_id: str,
+    resolution: int,
+    extent: float,
+    rotation: np.ndarray,
+    nodes: np.ndarray,
+    weights: np.ndarray,
+    mode_key: str,
+    orbital_id: str,
+    chunk_size: int = 8,
+) -> tuple[np.ndarray, dict[str, float]]:
+    total_start = time.perf_counter()
+    grid_start = time.perf_counter()
+    _coords, grid_a, grid_b, grid_c = _get_integral_grid(resolution, extent)
+    grid_ms = (time.perf_counter() - grid_start) * 1000
+    rotation = np.ascontiguousarray(rotation, dtype=np.float64)
+    nodes = np.ascontiguousarray(nodes, dtype=np.float64)
+    weights = np.ascontiguousarray(weights, dtype=np.float64)
+
+    axis_start = time.perf_counter()
+    if view_id == "X":
+        axis_label = "x"
+        base_x = None
+        base_y, base_z, base_w = grid_a, grid_b, grid_c
+    elif view_id == "Y":
+        axis_label = "y"
+        base_y = None
+        base_x, base_z, base_w = grid_a, grid_b, grid_c
+    elif view_id == "Z":
+        axis_label = "z"
+        base_z = None
+        base_x, base_y, base_w = grid_a, grid_b, grid_c
+    else:
+        axis_label = "w"
+        base_w = None
+        base_x, base_y, base_z = grid_a, grid_b, grid_c
+    axis_ms = (time.perf_counter() - axis_start) * 1000
+
+    alloc_start = time.perf_counter()
+    accumulator = np.zeros_like(grid_a, dtype=np.float64)
+    orbital = get_orbital_by_id(orbital_id)
+    alloc_ms = (time.perf_counter() - alloc_start) * 1000
+    psi_eval_ms = 0.0
+    reduce_ms = 0.0
+    transform_ms = 0.0
+    effective_chunk = max(1, min(int(chunk_size), int(nodes.size)))
+
+    for start in range(0, nodes.size, effective_chunk):
+        end = min(start + effective_chunk, nodes.size)
+        chunk_alloc_start = time.perf_counter()
+        t_values = nodes[start:end]
+        w_values = weights[start:end]
+        t_values = t_values[:, np.newaxis, np.newaxis, np.newaxis]
+
+        if axis_label == "x":
+            x = t_values
+            y = base_y[np.newaxis, ...]
+            z = base_z[np.newaxis, ...]
+            w = base_w[np.newaxis, ...]
+        elif axis_label == "y":
+            x = base_x[np.newaxis, ...]
+            y = t_values
+            z = base_z[np.newaxis, ...]
+            w = base_w[np.newaxis, ...]
+        elif axis_label == "z":
+            x = base_x[np.newaxis, ...]
+            y = base_y[np.newaxis, ...]
+            z = t_values
+            w = base_w[np.newaxis, ...]
+        else:
+            x = base_x[np.newaxis, ...]
+            y = base_y[np.newaxis, ...]
+            z = base_z[np.newaxis, ...]
+            w = t_values
+        alloc_ms += (time.perf_counter() - chunk_alloc_start) * 1000
+
+        transform_start = time.perf_counter()
+        xr = (
+            x * rotation[0, 0]
+            + y * rotation[0, 1]
+            + z * rotation[0, 2]
+            + w * rotation[0, 3]
+        )
+        yr = (
+            x * rotation[1, 0]
+            + y * rotation[1, 1]
+            + z * rotation[1, 2]
+            + w * rotation[1, 3]
+        )
+        zr = (
+            x * rotation[2, 0]
+            + y * rotation[2, 1]
+            + z * rotation[2, 2]
+            + w * rotation[2, 3]
+        )
+        wr = (
+            x * rotation[3, 0]
+            + y * rotation[3, 1]
+            + z * rotation[3, 2]
+            + w * rotation[3, 3]
+        )
+        transform_ms += (time.perf_counter() - transform_start) * 1000
+
+        psi_start = time.perf_counter()
+        psi = orbital.evaluate(xr, yr, zr, wr)
+        psi_eval_ms += (time.perf_counter() - psi_start) * 1000
+
+        reduce_start = time.perf_counter()
+        if mode_key == "integral_strict":
+            accumulator += (psi * w_values[:, np.newaxis, np.newaxis, np.newaxis]).sum(axis=0)
+        elif mode_key == "integral_abs":
+            accumulator += (np.abs(psi) * w_values[:, np.newaxis, np.newaxis, np.newaxis]).sum(
+                axis=0
+            )
+        else:
+            accumulator = np.maximum(accumulator, np.max(np.abs(psi), axis=0))
+        reduce_ms += (time.perf_counter() - reduce_start) * 1000
+
+    total_vol_ms = (time.perf_counter() - total_start) * 1000
+    breakdown = {
+        "grid_ms": grid_ms,
+        "axis_ms": axis_ms,
+        "alloc_ms": alloc_ms,
+        "transform_ms": transform_ms,
+        "psi_eval_ms": psi_eval_ms,
+        "reduce_ms": reduce_ms,
+        "total_vol_ms": total_vol_ms,
+    }
+    return accumulator, breakdown
+
+
 def _compute_integral_volume_task(
     view_id: str,
     resolution: int,
     extent: float,
     rotation: np.ndarray,
-    samples: int,
+    nodes: np.ndarray,
+    weights: np.ndarray,
     mode_key: str,
     orbital_id: str,
-) -> tuple[str, np.ndarray]:
-    coords = np.linspace(-extent, extent, resolution, dtype=np.float64)
-    nodes, weights = np.polynomial.legendre.leggauss(samples)
-    nodes = nodes * extent
-    weights = weights * extent
-    view_axis = _VIEW_AXIS[view_id]
-    orbital_index = _ORBITAL_INDEX.get(orbital_id, 0)
-    mode_flag = 0 if mode_key == "integral_strict" else 1 if mode_key == "integral_abs" else 2
-    volume = _integral_volume_kernel(
-        view_axis,
-        coords,
+) -> tuple[str, np.ndarray, dict[str, float]]:
+    volume, breakdown = _compute_integral_volume_vectorized(
+        view_id,
+        resolution,
+        extent,
+        rotation,
         nodes,
         weights,
-        rotation,
-        orbital_index,
-        mode_flag,
+        mode_key,
+        orbital_id,
     )
-    return view_id, volume
+    return view_id, volume, breakdown
 
 
 def _volume_cache_key(
@@ -489,74 +631,22 @@ def _generate_integral_volume(
     orbital_id: str,
     cancel_event: threading.Event | None = None,
 ) -> np.ndarray | None:
-    rotation = np.ascontiguousarray(rotation, dtype=np.float64)
-    coords = np.linspace(-extent, extent, resolution)
-    grid_a, grid_b, grid_c = np.meshgrid(coords, coords, coords, indexing="ij")
-
-    if view_id == "X":
-        axis_label = "x"
-        y, z, w = grid_a, grid_b, grid_c
-    elif view_id == "Y":
-        axis_label = "y"
-        x, z, w = grid_a, grid_b, grid_c
-    elif view_id == "Z":
-        axis_label = "z"
-        x, y, w = grid_a, grid_b, grid_c
-    else:
-        axis_label = "w"
-        x, y, z = grid_a, grid_b, grid_c
-
     nodes, weights = np.polynomial.legendre.leggauss(samples)
     nodes = nodes * extent
     weights = weights * extent
-
-    grid_flat = grid_a.reshape(-1)
-    if view_id == "X":
-        y_flat, z_flat, w_flat = y.reshape(-1), z.reshape(-1), w.reshape(-1)
-    elif view_id == "Y":
-        x_flat, z_flat, w_flat = x.reshape(-1), z.reshape(-1), w.reshape(-1)
-    elif view_id == "Z":
-        x_flat, y_flat, w_flat = x.reshape(-1), y.reshape(-1), w.reshape(-1)
-    else:
-        x_flat, y_flat, z_flat = x.reshape(-1), y.reshape(-1), z.reshape(-1)
-
-    accumulator = np.zeros_like(grid_flat, dtype=np.float64)
-    orbital = get_orbital_by_id(orbital_id)
-
-    for t_value, weight in zip(nodes, weights):
-        if cancel_event is not None and cancel_event.is_set():
-            return None
-        if axis_label == "x":
-            x_vals = np.full_like(grid_flat, t_value, dtype=np.float64)
-            points = np.stack([x_vals, y_flat, z_flat, w_flat], axis=1)
-        elif axis_label == "y":
-            y_vals = np.full_like(grid_flat, t_value, dtype=np.float64)
-            points = np.stack([x_flat, y_vals, z_flat, w_flat], axis=1)
-        elif axis_label == "z":
-            z_vals = np.full_like(grid_flat, t_value, dtype=np.float64)
-            points = np.stack([x_flat, y_flat, z_vals, w_flat], axis=1)
-        else:
-            w_vals = np.full_like(grid_flat, t_value, dtype=np.float64)
-            points = np.stack([x_flat, y_flat, z_flat, w_vals], axis=1)
-
-        p0 = points[:, 0]
-        p1 = points[:, 1]
-        p2 = points[:, 2]
-        p3 = points[:, 3]
-        xr = p0 * rotation[0, 0] + p1 * rotation[0, 1] + p2 * rotation[0, 2] + p3 * rotation[0, 3]
-        yr = p0 * rotation[1, 0] + p1 * rotation[1, 1] + p2 * rotation[1, 2] + p3 * rotation[1, 3]
-        zr = p0 * rotation[2, 0] + p1 * rotation[2, 1] + p2 * rotation[2, 2] + p3 * rotation[2, 3]
-        wr = p0 * rotation[3, 0] + p1 * rotation[3, 1] + p2 * rotation[3, 2] + p3 * rotation[3, 3]
-        psi = orbital.evaluate(xr, yr, zr, wr)
-
-        if mode_key == "integral_strict":
-            accumulator += psi * weight
-        elif mode_key == "integral_abs":
-            accumulator += np.abs(psi) * weight
-        else:
-            accumulator = np.maximum(accumulator, np.abs(psi))
-
-    return accumulator.reshape(grid_a.shape)
+    if cancel_event is not None and cancel_event.is_set():
+        return None
+    volume, _ = _compute_integral_volume_vectorized(
+        view_id,
+        resolution,
+        extent,
+        rotation,
+        nodes,
+        weights,
+        mode_key,
+        orbital_id,
+    )
+    return volume
 
 
 def _extract_mesh(
@@ -593,29 +683,30 @@ def _precheck_strict_integral(
     rotation: np.ndarray,
     orbital_id: str,
 ) -> dict[str, float]:
-    coords = np.linspace(-extent, extent, resolution, dtype=np.float64)
     nodes, weights = np.polynomial.legendre.leggauss(STRICT_PRECHECK_SAMPLES)
     nodes = nodes * extent
     weights = weights * extent
-    view_axis = _VIEW_AXIS[view_id]
-    orbital_index = _ORBITAL_INDEX.get(orbital_id, 0)
-    vol_pre = _integral_volume_kernel(
-        view_axis,
-        coords,
+    vol_pre, _ = _compute_integral_volume_vectorized(
+        view_id,
+        resolution,
+        extent,
+        rotation,
         nodes,
         weights,
-        rotation,
-        orbital_index,
-        0,
+        "integral_strict",
+        orbital_id,
+        chunk_size=STRICT_PRECHECK_SAMPLES,
     )
-    vol_abs_pre = _integral_volume_kernel(
-        view_axis,
-        coords,
+    vol_abs_pre, _ = _compute_integral_volume_vectorized(
+        view_id,
+        resolution,
+        extent,
+        rotation,
         nodes,
         weights,
-        rotation,
-        orbital_index,
-        1,
+        "integral_abs",
+        orbital_id,
+        chunk_size=STRICT_PRECHECK_SAMPLES,
     )
     if vol_pre.size == 0:
         return {"strict_max": 0.0, "abs_max": 0.0}
@@ -981,6 +1072,7 @@ class RenderWorker(QtCore.QObject):
         extent = self._params["extent"]
         orbital_id = self._params["orbital_id"]
         allow_mesh = self._params.get("allow_mesh", True)
+        request_time = float(self._params.get("request_time", time.perf_counter()))
 
         # Logging intentionally minimal; strict-empty decisions are logged separately.
 
@@ -988,6 +1080,7 @@ class RenderWorker(QtCore.QObject):
         rotation = np.ascontiguousarray(rotation, dtype=np.float64)
         view_ids = ["X", "Y", "Z", "W"]
         view_index = {view_id: idx for idx, view_id in enumerate(view_ids, start=1)}
+        priority_view = self._params.get("priority_view", PRIMARY_VIEW)
 
         def handle_volume(
             view_id: str,
@@ -995,6 +1088,7 @@ class RenderWorker(QtCore.QObject):
             volume_hit: bool,
             t0: float,
             t1: float,
+            breakdown: dict[str, float] | None = None,
         ) -> None:
             if self._cancel_event.is_set():
                 return
@@ -1102,6 +1196,14 @@ class RenderWorker(QtCore.QObject):
                 mesh_neg_reason = strict_empty_reason or "strict-empty"
 
             t2 = time.perf_counter()
+            vol_ms = (t1 - t0) * 1000
+            mesh_ms = (t2 - t1) * 1000
+            total_ms = (t2 - t0) * 1000
+            psi_eval_ms = breakdown.get("psi_eval_ms", 0.0) if breakdown else 0.0
+            reduce_ms = breakdown.get("reduce_ms", 0.0) if breakdown else 0.0
+            breakdown_total = breakdown.get("total_vol_ms", 0.0) if breakdown else 0.0
+            compute_ms = breakdown_total + mesh_ms
+            queue_wait_ms = (t0 - request_time) * 1000
             self.log_line.emit(
                 "perf: "
                 f"req={self._request_id} "
@@ -1110,11 +1212,48 @@ class RenderWorker(QtCore.QObject):
                 f"res={resolution} "
                 f"samples={samples} "
                 f"extent={extent} "
-                f"vol_ms={(t1 - t0) * 1000:.2f} "
-                f"mesh_ms={(t2 - t1) * 1000:.2f} "
-                f"total_ms={(t2 - t0) * 1000:.2f} "
+                f"vol_ms={vol_ms:.2f} "
+                f"psi_eval_ms={psi_eval_ms:.2f} "
+                f"reduce_ms={reduce_ms:.2f} "
+                f"mesh_ms={mesh_ms:.2f} "
+                f"total_ms={total_ms:.2f} "
                 f"mesh_backend={mesh_backend}"
             )
+            if breakdown:
+                self.log_line.emit(
+                    "perf_vol_breakdown: "
+                    f"req={self._request_id} "
+                    f"view={view_id} "
+                    f"mode={mode_key} "
+                    f"res={resolution} "
+                    f"samples={samples} "
+                    f"grid_ms={breakdown.get('grid_ms', 0.0):.2f} "
+                    f"axis_ms={breakdown.get('axis_ms', 0.0):.2f} "
+                    f"alloc_ms={breakdown.get('alloc_ms', 0.0):.2f} "
+                    f"transform_ms={breakdown.get('transform_ms', 0.0):.2f} "
+                    f"psi_eval_ms={breakdown.get('psi_eval_ms', 0.0):.2f} "
+                    f"reduce_ms={breakdown.get('reduce_ms', 0.0):.2f} "
+                    f"total_vol_ms={breakdown.get('total_vol_ms', 0.0):.2f}"
+                )
+            if (
+                mode_key in {"integral_strict", "integral_abs"}
+                and orbital_id == "1s(k=0)"
+                and resolution == 64
+                and samples == 32
+                and vol_ms > 1200
+            ):
+                self.log_line.emit(
+                    _log_event(
+                        "perf_warn",
+                        mode_key=mode_key,
+                        orbital_id=orbital_id,
+                        view_id=view_id,
+                        resolution=resolution,
+                        samples=samples,
+                        vol_ms=f"{vol_ms:.2f}",
+                        target_ms=1200,
+                    )
+                )
 
             clipped = False
             shell_max = 0.0
@@ -1152,6 +1291,9 @@ class RenderWorker(QtCore.QObject):
                 "strict_empty_reason": strict_empty_reason,
                 "clipped": clipped,
                 "shell_max": shell_max,
+                "queue_wait_ms": queue_wait_ms,
+                "compute_ms": compute_ms,
+                "compute_done_ts": t2,
             }
             self.log_line.emit(
                 _log_event(
@@ -1210,11 +1352,143 @@ class RenderWorker(QtCore.QObject):
                 t1 = time.perf_counter()
                 handle_volume(view_id, vol, volume_hit, t0, t1)
         else:
+            nodes, weights = np.polynomial.legendre.leggauss(samples)
+            nodes = nodes * extent
+            weights = weights * extent
+            remaining_views = [vid for vid in view_ids if vid != priority_view]
+            if mode_key in {"integral_strict", "integral_abs", "max_abs"} and remaining_views:
+                self.log_line.emit(
+                    f"perf_priority: primary={priority_view} deferred={remaining_views}"
+                )
+
+            def run_view_inline(view_id: str) -> bool:
+                if self._cancel_event.is_set():
+                    return False
+                t0 = time.perf_counter()
+                volume_key = _volume_cache_key(
+                    orbital_id,
+                    mode_key,
+                    self._params["angles"],
+                    resolution,
+                    samples,
+                    extent,
+                    view_id,
+                )
+                with self._cache_lock:
+                    volume_hit, cached_vol = self._volume_cache.get_with_hit(volume_key)
+                if volume_hit:
+                    t1 = time.perf_counter()
+                    handle_volume(view_id, cached_vol, True, t0, t1, None)
+                    return True
+                if mode_key == "integral_strict":
+                    precheck = _precheck_strict_integral(
+                        view_id,
+                        resolution,
+                        extent,
+                        rotation,
+                        orbital_id,
+                    )
+                    abs_max = precheck["abs_max"]
+                    strict_max = precheck["strict_max"]
+                    ratio = (strict_max / abs_max) if abs_max > 0 else 0.0
+                    if abs_max <= 0.0:
+                        strict_early_empty_info[view_id] = {
+                            "strict_max": strict_max,
+                            "abs_max": abs_max,
+                            "ratio": ratio,
+                            "extent": extent,
+                            "reason": "strict-empty-abs-zero",
+                        }
+                        self.log_line.emit(
+                            _log_event(
+                                "strict_empty",
+                                orbital_id=orbital_id,
+                                mode_key=mode_key,
+                                view_id=view_id,
+                                strict_max=f"{strict_max:.3e}",
+                                abs_max=f"{abs_max:.3e}",
+                                ratio=f"{ratio:.3e}",
+                                samples_pre=STRICT_PRECHECK_SAMPLES,
+                            )
+                        )
+                        empty_vol = np.array([])
+                        with self._cache_lock:
+                            self._volume_cache.set(volume_key, empty_vol)
+                        t1 = time.perf_counter()
+                        handle_volume(view_id, empty_vol, False, t0, t1)
+                        return True
+                    if ratio < STRICT_CANCEL_RATIO and strict_max < STRICT_MAX_CAP:
+                        strict_early_empty_info[view_id] = {
+                            "strict_max": strict_max,
+                            "abs_max": abs_max,
+                            "ratio": ratio,
+                            "extent": extent,
+                            "reason": "strict-empty-precheck",
+                        }
+                        self.log_line.emit(
+                            _log_event(
+                                "strict_empty",
+                                orbital_id=orbital_id,
+                                mode_key=mode_key,
+                                view_id=view_id,
+                                strict_max=f"{strict_max:.3e}",
+                                abs_max=f"{abs_max:.3e}",
+                                ratio=f"{ratio:.3e}",
+                                samples_pre=STRICT_PRECHECK_SAMPLES,
+                            )
+                        )
+                        empty_vol = np.array([])
+                        with self._cache_lock:
+                            self._volume_cache.set(volume_key, empty_vol)
+                        t1 = time.perf_counter()
+                        handle_volume(view_id, empty_vol, False, t0, t1)
+                        return True
+                    self.log_line.emit(
+                        _log_event(
+                            "strict_not_empty",
+                            orbital_id=orbital_id,
+                            mode_key=mode_key,
+                            view_id=view_id,
+                            strict_max=f"{strict_max:.3e}",
+                            abs_max=f"{abs_max:.3e}",
+                            ratio=f"{ratio:.3e}",
+                            samples_pre=STRICT_PRECHECK_SAMPLES,
+                        )
+                    )
+                vol, breakdown = _compute_integral_volume_vectorized(
+                    view_id,
+                    resolution,
+                    extent,
+                    rotation,
+                    nodes,
+                    weights,
+                    mode_key,
+                    orbital_id,
+                )
+                if vol.size and not np.isfinite(vol).all():
+                    vol = np.array([])
+                with self._cache_lock:
+                    self._volume_cache.set(volume_key, vol)
+                t1 = time.perf_counter()
+                handle_volume(view_id, vol, False, t0, t1, breakdown)
+                return True
+
+            should_prioritize = (
+                mode_key in {"integral_strict", "integral_abs", "max_abs"}
+                and priority_view in view_ids
+            )
+            if should_prioritize:
+                run_view_inline(priority_view)
+                if self._cancel_event.is_set():
+                    self.finished.emit(self._request_id)
+                    return
             futures = {}
             future_start_times: dict[object, float] = {}
             with ProcessPoolExecutor(max_workers=4) as executor:
                 try:
                     for view_id in view_ids:
+                        if should_prioritize and view_id == priority_view:
+                            continue
                         if self._cancel_event.is_set():
                             for future in futures:
                                 future.cancel()
@@ -1235,7 +1509,7 @@ class RenderWorker(QtCore.QObject):
                             volume_hit, cached_vol = self._volume_cache.get_with_hit(volume_key)
                         if volume_hit:
                             t1 = time.perf_counter()
-                            handle_volume(view_id, cached_vol, True, t0, t1)
+                            handle_volume(view_id, cached_vol, True, t0, t1, None)
                             continue
                         if mode_key == "integral_strict":
                             precheck = _precheck_strict_integral(
@@ -1318,7 +1592,8 @@ class RenderWorker(QtCore.QObject):
                             resolution,
                             extent,
                             rotation,
-                            samples,
+                            nodes,
+                            weights,
                             mode_key,
                             orbital_id,
                         )
@@ -1333,7 +1608,7 @@ class RenderWorker(QtCore.QObject):
                             break
                         volume_key = futures[future]
                         try:
-                            view_id, vol = future.result()
+                            view_id, vol, breakdown = future.result()
                         except Exception:
                             continue
                         if vol.size and not np.isfinite(vol).all():
@@ -1342,7 +1617,7 @@ class RenderWorker(QtCore.QObject):
                             self._volume_cache.set(volume_key, vol)
                         t0 = future_start_times.get(future, time.perf_counter())
                         t1 = time.perf_counter()
-                        handle_volume(view_id, vol, False, t0, t1)
+                        handle_volume(view_id, vol, False, t0, t1, breakdown)
                 finally:
                     if self._cancel_event.is_set():
                         for future in futures:
@@ -1842,6 +2117,34 @@ class MainWindow(QtWidgets.QMainWindow):
             return mapping[current]
         return self.state.resolution, self.state.integral_samples
 
+    def _apply_quality_caps(
+        self,
+        mode_key: str,
+        quality_label: str,
+        resolution: int,
+        samples: int,
+    ) -> tuple[int, int]:
+        if mode_key not in {"integral_strict", "integral_abs", "max_abs"}:
+            return resolution, samples
+        if quality_label == "预览":
+            cap_resolution = 48
+            cap_samples = 16
+        else:
+            cap_resolution = 64
+            cap_samples = 32
+        used_resolution = min(resolution, cap_resolution)
+        used_samples = min(samples, cap_samples)
+        if used_resolution != resolution or used_samples != samples:
+            self._append_log(
+                "quality_cap: "
+                f"mode={mode_key} "
+                f"requested_res={resolution} "
+                f"requested_samples={samples} "
+                f"used_res={used_resolution} "
+                f"used_samples={used_samples}"
+            )
+        return used_resolution, used_samples
+
     def _schedule_render(self, quality_label: str) -> None:
         if self._shutting_down:
             return
@@ -1905,6 +2208,13 @@ class MainWindow(QtWidgets.QMainWindow):
                 self._last_mesh_time = now
 
         resolution, samples = self._quality_to_settings(quality_label)
+        resolution, samples = self._apply_quality_caps(
+            mode_key,
+            quality_label,
+            resolution,
+            samples,
+        )
+        request_time = time.perf_counter()
         params = {
             "orbital_id": orbital.orbital_id,
             "mode_label": self.state.projection_mode,
@@ -1915,6 +2225,8 @@ class MainWindow(QtWidgets.QMainWindow):
             "extent": extent,
             "quality_label": quality_label,
             "allow_mesh": allow_mesh,
+            "request_time": request_time,
+            "priority_view": PRIMARY_VIEW,
         }
 
         reason_map = {
@@ -2051,6 +2363,23 @@ class MainWindow(QtWidgets.QMainWindow):
                     quality=quality_label,
                 )
             )
+        compute_done_ts = info.get("compute_done_ts")
+        post_ms = (time.perf_counter() - compute_done_ts) * 1000 if compute_done_ts else 0.0
+        queue_wait_ms = float(info.get("queue_wait_ms", 0.0))
+        compute_ms = float(info.get("compute_ms", 0.0))
+        total_ms = queue_wait_ms + compute_ms + post_ms
+        self._append_log(
+            "perf2: "
+            f"req={request_id} "
+            f"view={view_id} "
+            f"mode={info.get('mode_key')} "
+            f"res={info.get('resolution')} "
+            f"samples={info.get('samples')} "
+            f"queue_wait_ms={queue_wait_ms:.2f} "
+            f"compute_ms={compute_ms:.2f} "
+            f"post_ms={post_ms:.2f} "
+            f"total_ms={total_ms:.2f}"
+        )
 
     def _on_render_finished(self, request_id: int) -> None:
         if request_id != self._active_request_id:
