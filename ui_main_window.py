@@ -872,6 +872,35 @@ class RenderWorker(QtCore.QObject):
             strict_cancelled = strict_mode and strict_empty_info is not None
             strict_empty_reason = strict_empty_info.get("reason") if strict_empty_info else ""
 
+            if strict_mode and not strict_cancelled and vol.size:
+                abs_vol = np.abs(vol)
+                mean_abs = float(np.mean(abs_vol))
+                q95 = float(np.quantile(abs_vol, 0.95))
+                if max_abs < 1e-10 or (
+                    max_abs > 0
+                    and mean_abs / max_abs < 0.01
+                    and q95 / max_abs < 0.05
+                ):
+                    strict_cancelled = True
+                    strict_empty_reason = "strict-empty-noise"
+                    strict_empty_info = {
+                        "max_abs": max_abs,
+                        "mean_abs": mean_abs,
+                        "q95": q95,
+                        "reason": strict_empty_reason,
+                    }
+                    self.log_line.emit(
+                        _log_event(
+                            "strict_empty_noise",
+                            orbital_id=orbital_id,
+                            mode_key=mode_key,
+                            view_id=view_id,
+                            max_abs=f"{max_abs:.3e}",
+                            mean_abs=f"{mean_abs:.3e}",
+                            q95=f"{q95:.3e}",
+                        )
+                    )
+
             mesh_hit_pos = False
             mesh_hit_neg = False
             mesh_pos = None
@@ -1479,7 +1508,8 @@ class MainWindow(QtWidgets.QMainWindow):
             and self._render_thread.isRunning()
         ):
             self._render_thread.quit()
-            self._render_thread.wait(1000)
+            if not self._render_thread.wait(5000):
+                self._append_log("关闭窗口时渲染线程超时未退出（5s），保留引用避免QThread销毁报错")
         self._cleanup_retired_threads(force=True)
         for view in self.projection_views.values():
             view.plotter.close()
@@ -1758,8 +1788,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self._render_worker = None
         try:
             self._cleanup_retired_threads(force=False)
-        except RuntimeError:
-            self._retired_threads = []
+        except RuntimeError as exc:
+            self._append_log(f"cleanup_retired_threads_failed: {exc}")
         if self._pending_render_request is not None:
             quality_label, reason = self._pending_render_request
             self._pending_render_request = None
@@ -1772,21 +1802,59 @@ class MainWindow(QtWidgets.QMainWindow):
                 continue
             try:
                 running = thread.isRunning()
-            except RuntimeError:
+            except RuntimeError as exc:
+                self._append_log(f"cleanup_retired_thread_check_failed: {exc}")
+                remaining.append((thread, worker, cancel_event))
                 continue
             if force:
                 cancel_event.set()
                 if running:
-                    thread.quit()
-                    thread.wait(1000)
+                    try:
+                        thread.quit()
+                    except RuntimeError as exc:
+                        self._append_log(f"cleanup_retired_thread_quit_failed: {exc}")
+                    try:
+                        thread.wait(5000)
+                    except RuntimeError as exc:
+                        self._append_log(f"cleanup_retired_thread_wait_failed: {exc}")
+                try:
+                    still_running = thread.isRunning()
+                except RuntimeError as exc:
+                    self._append_log(f"cleanup_retired_thread_recheck_failed: {exc}")
+                    remaining.append((thread, worker, cancel_event))
+                    continue
+                if still_running:
+                    remaining.append((thread, worker, cancel_event))
+                else:
+                    try:
+                        thread.deleteLater()
+                    except RuntimeError as exc:
+                        self._append_log(f"cleanup_retired_thread_delete_failed: {exc}")
+                    try:
+                        worker.deleteLater()
+                    except RuntimeError as exc:
+                        self._append_log(f"cleanup_retired_worker_delete_failed: {exc}")
                 continue
             if running:
                 remaining.append((thread, worker, cancel_event))
-            else:
-                try:
-                    thread.quit()
-                except RuntimeError:
-                    continue
+                continue
+            try:
+                thread.quit()
+            except RuntimeError as exc:
+                self._append_log(f"cleanup_retired_thread_quit_failed: {exc}")
+                remaining.append((thread, worker, cancel_event))
+                continue
+            try:
+                thread.deleteLater()
+            except RuntimeError as exc:
+                self._append_log(f"cleanup_retired_thread_delete_failed: {exc}")
+                remaining.append((thread, worker, cancel_event))
+                continue
+            try:
+                worker.deleteLater()
+            except RuntimeError as exc:
+                self._append_log(f"cleanup_retired_worker_delete_failed: {exc}")
+                remaining.append((thread, worker, cancel_event))
         self._retired_threads = remaining
 
     def _update_status(self, info: dict, view_index: int, cache_text: str) -> None:
