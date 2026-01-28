@@ -15,11 +15,16 @@ def main() -> None:
     faulthandler.enable()
     parser = argparse.ArgumentParser()
     parser.add_argument("--selftest", action="store_true", help="Run correctness self-test and exit.")
+    parser.add_argument(
+        "--selftest-fast",
+        action="store_true",
+        help="Run a smaller subset of the self-test harness.",
+    )
     args, _ = parser.parse_known_args()
-    if args.selftest:
+    if args.selftest or args.selftest_fast:
         from ui_main_window import run_selftest
 
-        code = run_selftest()
+        code = run_selftest(fast=args.selftest_fast)
         raise SystemExit(code)
     if os.getenv("CALIBRATE_EXTENTS") == "1":
         table = calibrate_extents()
