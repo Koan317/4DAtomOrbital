@@ -62,9 +62,8 @@ else:  # pragma: no cover - headless selftest
 ISO_PERCENT_FIXED = 3.0
 STRICT_PRECHECK_SAMPLES = 8
 STRICT_ABS_EPS = 1e-10
-STRICT_MEAN_RATIO = 0.01
-STRICT_Q95_RATIO = 0.05
-STRICT_SHELL_RATIO = 0.05
+STRICT_CANCEL_RATIO = 0.02
+STRICT_MAX_CAP = 1e-6
 
 EXTENT_TABLE = {
     ("1s(k=0)", "slice"): 10.0,
@@ -582,26 +581,6 @@ def _extract_mesh(
     return (verts, faces), ""
 
 
-def _is_strict_cancellation_dominated(
-    max_abs: float,
-    mean_abs: float,
-    q95: float,
-    shell_max: float,
-) -> bool:
-    if max_abs <= STRICT_ABS_EPS:
-        return True
-    if max_abs <= 0:
-        return True
-    mean_ratio = mean_abs / max_abs
-    q95_ratio = q95 / max_abs
-    shell_ratio = shell_max / max_abs
-    return (
-        mean_ratio < STRICT_MEAN_RATIO
-        and q95_ratio < STRICT_Q95_RATIO
-        and shell_ratio < STRICT_SHELL_RATIO
-    )
-
-
 def _precheck_strict_integral(
     view_id: str,
     resolution: int,
@@ -624,14 +603,21 @@ def _precheck_strict_integral(
         orbital_index,
         0,
     )
+    vol_abs_pre = _integral_volume_kernel(
+        view_axis,
+        coords,
+        nodes,
+        weights,
+        rotation,
+        orbital_index,
+        1,
+    )
     if vol_pre.size == 0:
-        return {"max_abs": 0.0, "mean_abs": 0.0, "q95": 0.0, "shell_max": 0.0}
+        return {"strict_max": 0.0, "abs_max": 0.0}
     abs_vol = np.abs(vol_pre)
     return {
-        "max_abs": float(np.max(abs_vol)),
-        "mean_abs": float(np.mean(abs_vol)),
-        "q95": float(np.quantile(abs_vol, 0.95)),
-        "shell_max": _boundary_max_abs(vol_pre),
+        "strict_max": float(np.max(abs_vol)),
+        "abs_max": float(np.max(vol_abs_pre)) if vol_abs_pre.size else 0.0,
     }
 
 
@@ -791,11 +777,11 @@ def run_selftest() -> int:
                     precheck = _precheck_strict_integral(
                         view_id, resolution, extent, rotation, orbital_id
                     )
-                    if _is_strict_cancellation_dominated(
-                        precheck["max_abs"],
-                        precheck["mean_abs"],
-                        precheck["q95"],
-                        precheck["shell_max"],
+                    abs_max = precheck["abs_max"]
+                    strict_max = precheck["strict_max"]
+                    ratio = (strict_max / abs_max) if abs_max > 0 else 0.0
+                    if abs_max <= 0.0 or (
+                        ratio < STRICT_CANCEL_RATIO and strict_max < STRICT_MAX_CAP
                     ):
                         vol = np.array([])
                         strict_empty = True
@@ -905,39 +891,26 @@ class RenderWorker(QtCore.QObject):
             strict_cancelled = strict_mode and strict_empty_info is not None
             strict_empty_reason = strict_empty_info.get("reason") if strict_empty_info else ""
 
-            strict_mean_abs = 0.0
-            strict_q95 = 0.0
-            strict_shell_max = 0.0
             if strict_mode and not strict_cancelled and vol.size:
-                abs_vol = np.abs(vol)
-                strict_mean_abs = float(np.mean(abs_vol))
-                strict_q95 = float(np.quantile(abs_vol, 0.95))
-                strict_shell_max = _boundary_max_abs(vol)
-                if _is_strict_cancellation_dominated(
-                    max_abs,
-                    strict_mean_abs,
-                    strict_q95,
-                    strict_shell_max,
-                ):
+                if max_abs <= STRICT_ABS_EPS:
                     strict_cancelled = True
-                    strict_empty_reason = "strict-empty-noise"
+                    strict_empty_reason = "strict-empty-post"
                     strict_empty_info = {
-                        "max_abs": max_abs,
-                        "mean_abs": strict_mean_abs,
-                        "q95": strict_q95,
-                        "shell_max": strict_shell_max,
+                        "strict_max": max_abs,
+                        "abs_max": 0.0,
+                        "ratio": 0.0,
                         "reason": strict_empty_reason,
                     }
                     self.log_line.emit(
                         _log_event(
-                            "strict_empty_noise",
+                            "strict_empty",
                             orbital_id=orbital_id,
                             mode_key=mode_key,
                             view_id=view_id,
-                            max_abs=f"{max_abs:.3e}",
-                            mean_abs=f"{strict_mean_abs:.3e}",
-                            q95=f"{strict_q95:.3e}",
-                            shell_max=f"{strict_shell_max:.3e}",
+                            strict_max=f"{max_abs:.3e}",
+                            abs_max="0.000e+00",
+                            ratio="0.000e+00",
+                            samples_pre=STRICT_PRECHECK_SAMPLES,
                         )
                     )
 
@@ -1112,17 +1085,39 @@ class RenderWorker(QtCore.QObject):
                                 rotation,
                                 orbital_id,
                             )
-                            if _is_strict_cancellation_dominated(
-                                precheck["max_abs"],
-                                precheck["mean_abs"],
-                                precheck["q95"],
-                                precheck["shell_max"],
-                            ):
+                            abs_max = precheck["abs_max"]
+                            strict_max = precheck["strict_max"]
+                            ratio = (strict_max / abs_max) if abs_max > 0 else 0.0
+                            if abs_max <= 0.0:
                                 strict_early_empty_info[view_id] = {
-                                    "max_abs_pre": precheck["max_abs"],
-                                    "mean_abs_pre": precheck["mean_abs"],
-                                    "q95_pre": precheck["q95"],
-                                    "shell_max_pre": precheck["shell_max"],
+                                    "strict_max": strict_max,
+                                    "abs_max": abs_max,
+                                    "ratio": ratio,
+                                    "extent": extent,
+                                    "reason": "strict-empty-abs-zero",
+                                }
+                                self.log_line.emit(
+                                    _log_event(
+                                        "strict_empty",
+                                        orbital_id=orbital_id,
+                                        mode_key=mode_key,
+                                        view_id=view_id,
+                                        strict_max=f"{strict_max:.3e}",
+                                        abs_max=f"{abs_max:.3e}",
+                                        ratio=f"{ratio:.3e}",
+                                        samples_pre=STRICT_PRECHECK_SAMPLES,
+                                    )
+                                )
+                                empty_vol = np.array([])
+                                with self._cache_lock:
+                                    self._volume_cache.set(volume_key, empty_vol)
+                                handle_volume(view_id, empty_vol, False)
+                                continue
+                            if ratio < STRICT_CANCEL_RATIO and strict_max < STRICT_MAX_CAP:
+                                strict_early_empty_info[view_id] = {
+                                    "strict_max": strict_max,
+                                    "abs_max": abs_max,
+                                    "ratio": ratio,
                                     "extent": extent,
                                     "reason": "strict-empty-precheck",
                                 }
@@ -1132,11 +1127,10 @@ class RenderWorker(QtCore.QObject):
                                         orbital_id=orbital_id,
                                         mode_key=mode_key,
                                         view_id=view_id,
-                                        extent=round(extent, 2),
-                                        max_abs_pre=f"{precheck['max_abs']:.3e}",
-                                        mean_abs_pre=f"{precheck['mean_abs']:.3e}",
-                                        q95_pre=f"{precheck['q95']:.3e}",
-                                        shell_max_pre=f"{precheck['shell_max']:.3e}",
+                                        strict_max=f"{strict_max:.3e}",
+                                        abs_max=f"{abs_max:.3e}",
+                                        ratio=f"{ratio:.3e}",
+                                        samples_pre=STRICT_PRECHECK_SAMPLES,
                                     )
                                 )
                                 empty_vol = np.array([])
@@ -1144,6 +1138,18 @@ class RenderWorker(QtCore.QObject):
                                     self._volume_cache.set(volume_key, empty_vol)
                                 handle_volume(view_id, empty_vol, False)
                                 continue
+                            self.log_line.emit(
+                                _log_event(
+                                    "strict_not_empty",
+                                    orbital_id=orbital_id,
+                                    mode_key=mode_key,
+                                    view_id=view_id,
+                                    strict_max=f"{strict_max:.3e}",
+                                    abs_max=f"{abs_max:.3e}",
+                                    ratio=f"{ratio:.3e}",
+                                    samples_pre=STRICT_PRECHECK_SAMPLES,
+                                )
+                            )
                         future = executor.submit(
                             _compute_integral_volume_task,
                             view_id,
@@ -1994,7 +2000,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 if worker is not None:
                     remaining_workers.append(worker)
                 continue
-            if worker is not None:
+            if worker is not None and isValid(worker):
                 try:
                     worker.deleteLater()
                 except RuntimeError as exc:
