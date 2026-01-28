@@ -61,7 +61,9 @@ else:  # pragma: no cover - headless selftest
 
 ISO_PERCENT_FIXED = 3.0
 STRICT_PRECHECK_SAMPLES = 8
-STRICT_ISO_ABS_FLOOR = 1e-3
+STRICT_ABS_EPS = 1e-10
+STRICT_CANCEL_RATIO = 0.02
+STRICT_MAX_CAP = 1e-6
 
 EXTENT_TABLE = {
     ("1s(k=0)", "slice"): 10.0,
@@ -585,7 +587,7 @@ def _precheck_strict_integral(
     extent: float,
     rotation: np.ndarray,
     orbital_id: str,
-) -> float:
+) -> dict[str, float]:
     coords = np.linspace(-extent, extent, resolution, dtype=np.float64)
     nodes, weights = np.polynomial.legendre.leggauss(STRICT_PRECHECK_SAMPLES)
     nodes = nodes * extent
@@ -601,9 +603,22 @@ def _precheck_strict_integral(
         orbital_index,
         0,
     )
+    vol_abs_pre = _integral_volume_kernel(
+        view_axis,
+        coords,
+        nodes,
+        weights,
+        rotation,
+        orbital_index,
+        1,
+    )
     if vol_pre.size == 0:
-        return 0.0
-    return float(np.max(np.abs(vol_pre)))
+        return {"strict_max": 0.0, "abs_max": 0.0}
+    abs_vol = np.abs(vol_pre)
+    return {
+        "strict_max": float(np.max(abs_vol)),
+        "abs_max": float(np.max(vol_abs_pre)) if vol_abs_pre.size else 0.0,
+    }
 
 
 def _boundary_max_abs(vol: np.ndarray) -> float:
@@ -759,11 +774,15 @@ def run_selftest() -> int:
                 if mode_key == "slice":
                     vol = _generate_slice_volume(view_id, resolution, extent, rotation, orbital_id)
                 elif mode_key == "integral_strict":
-                    max_abs_pre = _precheck_strict_integral(
+                    precheck = _precheck_strict_integral(
                         view_id, resolution, extent, rotation, orbital_id
                     )
-                    iso_pre = (ISO_PERCENT_FIXED / 100.0) * max_abs_pre
-                    if max_abs_pre <= 0 or iso_pre < STRICT_ISO_ABS_FLOOR:
+                    abs_max = precheck["abs_max"]
+                    strict_max = precheck["strict_max"]
+                    ratio = (strict_max / abs_max) if abs_max > 0 else 0.0
+                    if abs_max <= 0.0 or (
+                        ratio < STRICT_CANCEL_RATIO and strict_max < STRICT_MAX_CAP
+                    ):
                         vol = np.array([])
                         strict_empty = True
                     else:
@@ -872,6 +891,29 @@ class RenderWorker(QtCore.QObject):
             strict_cancelled = strict_mode and strict_empty_info is not None
             strict_empty_reason = strict_empty_info.get("reason") if strict_empty_info else ""
 
+            if strict_mode and not strict_cancelled and vol.size:
+                if max_abs <= STRICT_ABS_EPS:
+                    strict_cancelled = True
+                    strict_empty_reason = "strict-empty-post"
+                    strict_empty_info = {
+                        "strict_max": max_abs,
+                        "abs_max": 0.0,
+                        "ratio": 0.0,
+                        "reason": strict_empty_reason,
+                    }
+                    self.log_line.emit(
+                        _log_event(
+                            "strict_empty",
+                            orbital_id=orbital_id,
+                            mode_key=mode_key,
+                            view_id=view_id,
+                            strict_max=f"{max_abs:.3e}",
+                            abs_max="0.000e+00",
+                            ratio="0.000e+00",
+                            samples_pre=STRICT_PRECHECK_SAMPLES,
+                        )
+                    )
+
             mesh_hit_pos = False
             mesh_hit_neg = False
             mesh_pos = None
@@ -928,6 +970,10 @@ class RenderWorker(QtCore.QObject):
                         clipped = True
 
             view_time_ms = int((time.perf_counter() - view_start) * 1000)
+            pos_verts = mesh_pos[0].shape[0] if isinstance(mesh_pos, tuple) else 0
+            pos_faces = mesh_pos[1].shape[0] if isinstance(mesh_pos, tuple) else 0
+            neg_verts = mesh_neg[0].shape[0] if isinstance(mesh_neg, tuple) else 0
+            neg_faces = mesh_neg[1].shape[0] if isinstance(mesh_neg, tuple) else 0
             info = {
                 "view_index": view_index[view_id],
                 "volume_hit": volume_hit,
@@ -939,6 +985,7 @@ class RenderWorker(QtCore.QObject):
                 "mode_key": mode_key,
                 "resolution": resolution,
                 "samples": samples,
+                "extent": extent,
                 "iso_value": iso_value,
                 "vol_min": vol_min,
                 "vol_max": vol_max,
@@ -951,6 +998,26 @@ class RenderWorker(QtCore.QObject):
                 "clipped": clipped,
                 "shell_max": shell_max,
             }
+            self.log_line.emit(
+                _log_event(
+                    "view_debug",
+                    request_id=self._request_id,
+                    view_id=view_id,
+                    mode_key=mode_key,
+                    resolution=resolution,
+                    extent=round(extent, 2),
+                    samples=samples,
+                    max_abs=f"{max_abs:.3e}",
+                    iso_value=f"{iso_value:.3e}",
+                    volume_hit=volume_hit,
+                    mesh_hit_pos=mesh_hit_pos,
+                    mesh_hit_neg=mesh_hit_neg,
+                    pos_verts=pos_verts,
+                    pos_faces=pos_faces,
+                    neg_verts=neg_verts,
+                    neg_faces=neg_faces,
+                )
+            )
             self.view_ready.emit(self._request_id, view_id, mesh_pos, mesh_neg, info)
 
         strict_early_empty_info: dict[str, dict] = {}
@@ -988,81 +1055,134 @@ class RenderWorker(QtCore.QObject):
         else:
             futures = {}
             with ProcessPoolExecutor(max_workers=4) as executor:
-                for view_id in view_ids:
-                    if self._cancel_event.is_set():
-                        break
-                    volume_key = _volume_cache_key(
-                        orbital_id,
-                        mode_key,
-                        self._params["angles"],
-                        resolution,
-                        samples,
-                        extent,
-                        view_id,
-                    )
-                    with self._cache_lock:
-                        volume_hit, cached_vol = self._volume_cache.get_with_hit(volume_key)
-                    if volume_hit:
-                        handle_volume(view_id, cached_vol, True)
-                        continue
-                    if mode_key == "integral_strict":
-                        max_abs_pre = _precheck_strict_integral(
+                try:
+                    for view_id in view_ids:
+                        if self._cancel_event.is_set():
+                            for future in futures:
+                                future.cancel()
+                            executor.shutdown(wait=False, cancel_futures=True)
+                            futures.clear()
+                            break
+                        volume_key = _volume_cache_key(
+                            orbital_id,
+                            mode_key,
+                            self._params["angles"],
+                            resolution,
+                            samples,
+                            extent,
+                            view_id,
+                        )
+                        with self._cache_lock:
+                            volume_hit, cached_vol = self._volume_cache.get_with_hit(volume_key)
+                        if volume_hit:
+                            handle_volume(view_id, cached_vol, True)
+                            continue
+                        if mode_key == "integral_strict":
+                            precheck = _precheck_strict_integral(
+                                view_id,
+                                resolution,
+                                extent,
+                                rotation,
+                                orbital_id,
+                            )
+                            abs_max = precheck["abs_max"]
+                            strict_max = precheck["strict_max"]
+                            ratio = (strict_max / abs_max) if abs_max > 0 else 0.0
+                            if abs_max <= 0.0:
+                                strict_early_empty_info[view_id] = {
+                                    "strict_max": strict_max,
+                                    "abs_max": abs_max,
+                                    "ratio": ratio,
+                                    "extent": extent,
+                                    "reason": "strict-empty-abs-zero",
+                                }
+                                self.log_line.emit(
+                                    _log_event(
+                                        "strict_empty",
+                                        orbital_id=orbital_id,
+                                        mode_key=mode_key,
+                                        view_id=view_id,
+                                        strict_max=f"{strict_max:.3e}",
+                                        abs_max=f"{abs_max:.3e}",
+                                        ratio=f"{ratio:.3e}",
+                                        samples_pre=STRICT_PRECHECK_SAMPLES,
+                                    )
+                                )
+                                empty_vol = np.array([])
+                                with self._cache_lock:
+                                    self._volume_cache.set(volume_key, empty_vol)
+                                handle_volume(view_id, empty_vol, False)
+                                continue
+                            if ratio < STRICT_CANCEL_RATIO and strict_max < STRICT_MAX_CAP:
+                                strict_early_empty_info[view_id] = {
+                                    "strict_max": strict_max,
+                                    "abs_max": abs_max,
+                                    "ratio": ratio,
+                                    "extent": extent,
+                                    "reason": "strict-empty-precheck",
+                                }
+                                self.log_line.emit(
+                                    _log_event(
+                                        "strict_empty",
+                                        orbital_id=orbital_id,
+                                        mode_key=mode_key,
+                                        view_id=view_id,
+                                        strict_max=f"{strict_max:.3e}",
+                                        abs_max=f"{abs_max:.3e}",
+                                        ratio=f"{ratio:.3e}",
+                                        samples_pre=STRICT_PRECHECK_SAMPLES,
+                                    )
+                                )
+                                empty_vol = np.array([])
+                                with self._cache_lock:
+                                    self._volume_cache.set(volume_key, empty_vol)
+                                handle_volume(view_id, empty_vol, False)
+                                continue
+                            self.log_line.emit(
+                                _log_event(
+                                    "strict_not_empty",
+                                    orbital_id=orbital_id,
+                                    mode_key=mode_key,
+                                    view_id=view_id,
+                                    strict_max=f"{strict_max:.3e}",
+                                    abs_max=f"{abs_max:.3e}",
+                                    ratio=f"{ratio:.3e}",
+                                    samples_pre=STRICT_PRECHECK_SAMPLES,
+                                )
+                            )
+                        future = executor.submit(
+                            _compute_integral_volume_task,
                             view_id,
                             resolution,
                             extent,
                             rotation,
+                            samples,
+                            mode_key,
                             orbital_id,
                         )
-                        iso_pre = (ISO_PERCENT_FIXED / 100.0) * max_abs_pre
-                        if max_abs_pre <= 0 or iso_pre < STRICT_ISO_ABS_FLOOR:
-                            strict_early_empty_info[view_id] = {
-                                "max_abs_pre": max_abs_pre,
-                                "iso_pre": iso_pre,
-                                "extent": extent,
-                                "reason": "strict-empty-floor",
-                            }
-                            self.log_line.emit(
-                                _log_event(
-                                    "strict_empty",
-                                    orbital_id=orbital_id,
-                                    mode_key=mode_key,
-                                    view_id=view_id,
-                                    extent=round(extent, 2),
-                                    max_abs_pre=f"{max_abs_pre:.3e}",
-                                    iso_pre=f"{iso_pre:.3e}",
-                                    floor=f"{STRICT_ISO_ABS_FLOOR:.3e}",
-                                )
-                            )
-                            empty_vol = np.array([])
-                            with self._cache_lock:
-                                self._volume_cache.set(volume_key, empty_vol)
-                            handle_volume(view_id, empty_vol, False)
-                            continue
-                    future = executor.submit(
-                        _compute_integral_volume_task,
-                        view_id,
-                        resolution,
-                        extent,
-                        rotation,
-                        samples,
-                        mode_key,
-                        orbital_id,
-                    )
-                    futures[future] = volume_key
+                        futures[future] = volume_key
 
-                for future in as_completed(futures):
-                    volume_key = futures[future]
-                    try:
-                        view_id, vol = future.result()
-                    except Exception:
-                        continue
+                    for future in as_completed(futures):
+                        if self._cancel_event.is_set():
+                            for pending in futures:
+                                pending.cancel()
+                            executor.shutdown(wait=False, cancel_futures=True)
+                            break
+                        volume_key = futures[future]
+                        try:
+                            view_id, vol = future.result()
+                        except Exception:
+                            continue
+                        if vol.size and not np.isfinite(vol).all():
+                            vol = np.array([])
+                        with self._cache_lock:
+                            self._volume_cache.set(volume_key, vol)
+                        handle_volume(view_id, vol, False)
+                finally:
                     if self._cancel_event.is_set():
-                        continue
-                    if vol.size and not np.isfinite(vol).all():
-                        vol = np.array([])
-                    with self._cache_lock:
-                        self._volume_cache.set(volume_key, vol)
-                    handle_volume(view_id, vol, False)
+                        for future in futures:
+                            future.cancel()
+                        executor.shutdown(wait=False, cancel_futures=True)
 
         _ = start_total
         self.finished.emit(self._request_id)
@@ -1167,15 +1287,21 @@ class MainWindow(QtWidgets.QMainWindow):
         self._cancel_event: threading.Event | None = None
         self._render_thread: QtCore.QThread | None = None
         self._render_worker: RenderWorker | None = None
-        self._retired_threads: list[tuple[QtCore.QThread, RenderWorker, threading.Event]] = []
+        self._retired_threads: list[QtCore.QThread] = []
+        self._retired_workers: list[QtCore.QObject] = []
         self._last_params: dict | None = None
         self._pending_render_request: tuple[str, str] | None = None
+        self._pending_after_finish = False
+        self._shutting_down = False
         self._extent_retry_request_id: int | None = None
         self._extent_retry_attempted = False
 
         self._build_status_bar()
         self._build_central()
         self._load_extent_table()
+        self._append_log(
+            "复现建议：选择 2p(k=0)，切到 积分 ψ（严格），把某个角度滑到 XX°（用户提供），观察 W 视图是否应为空。"
+        )
 
         self._run_orbital_self_check()
         self._ready = True
@@ -1376,6 +1502,16 @@ class MainWindow(QtWidgets.QMainWindow):
         layout.addWidget(self.final_quality_combo)
 
         layout.addWidget(self.reset_button)
+
+        self.explanation_group = QtWidgets.QGroupBox("说明")
+        explanation_layout = QtWidgets.QVBoxLayout(self.explanation_group)
+        self.explanation_text = QtWidgets.QTextEdit()
+        self.explanation_text.setReadOnly(True)
+        self.explanation_text.setMinimumHeight(220)
+        self.explanation_text.setPlaceholderText("轨道/投影/旋转说明将在此显示。")
+        explanation_layout.addWidget(self.explanation_text)
+        layout.addWidget(self.explanation_group)
+
         self.log_panel = QtWidgets.QPlainTextEdit()
         self.log_panel.setReadOnly(True)
         self.log_panel.setPlaceholderText("界面事件日志...")
@@ -1383,8 +1519,46 @@ class MainWindow(QtWidgets.QMainWindow):
 
         return panel
 
+    def _update_explanation_panel(self) -> None:
+        if not getattr(self, "explanation_text", None):
+            return
+        orbital = get_orbital_by_id(self.state.orbital_id)
+        desc = orbital.short_desc_zh or orbital.display_name
+        k_value = orbital.k if orbital.k is not None else orbital.parameters.get("k")
+        params = f"参数：n={orbital.n}, l={orbital.l}"
+        if k_value is not None:
+            params += f", k={k_value}"
+
+        angle_text = ", ".join(
+            f"{key}={self.state.angles[key]}°"
+            for key in ["xy", "xz", "xw", "yz", "yw", "zw"]
+        )
+
+        text = "\n".join(
+            [
+                "当前轨道：",
+                f"  名称（严格ID）：{orbital.orbital_id}",
+                f"  {params}",
+                f"  一句话描述：{desc}",
+                "",
+                "当前投影模式：",
+                "  切片（快速）：在某一轴固定切片得到3D场，再抽等值面",
+                "  积分 ψ（严格）：沿被投影轴对 ψ 做有符号积分（可能发生正负抵消，部分角度可能为空）",
+                "  积分（稳定）：沿被投影轴对 |ψ| 积分（更稳定，通常更易出图）",
+                "  最大（可视化）：沿被投影轴取 max |ψ|（强调包络/峰值）",
+                "",
+                "旋转控制（6个平面旋转）：",
+                "  XY / XZ / XW / YZ / YW / ZW：分别表示在对应坐标平面内旋转",
+                "  组合效果：最终姿态是6个平面旋转叠加；调整任意一个会同步影响全部4个投影视图",
+                f"  当前角度：{angle_text}",
+                "  注意：这里显示不需要补前导0（例如 5° 而不是 005°）",
+            ]
+        )
+        self.explanation_text.setPlainText(text)
+
     def _on_angle_changed(self, name: str, value: int) -> None:
         self.state.angles[name] = value
+        self._update_explanation_panel()
         self._handle_value_change("angles")
 
     def _on_angle_released(self, name: str) -> None:
@@ -1408,6 +1582,7 @@ class MainWindow(QtWidgets.QMainWindow):
                     mode=mode_key,
                 )
             )
+        self._update_explanation_panel()
         self.on_ui_changed()
 
     def _reset_angles(self) -> None:
@@ -1419,7 +1594,10 @@ class MainWindow(QtWidgets.QMainWindow):
             widgets["value_label"].setText("0°")
         self.on_ui_changed()
 
-    def closeEvent(self, event: QtGui.QCloseEvent) -> None:
+    def shutdown(self) -> bool:
+        if self._shutting_down:
+            return True
+        self._shutting_down = True
         if self._render_timer.isActive():
             self._render_timer.stop()
         if self._cancel_event is not None:
@@ -1429,9 +1607,25 @@ class MainWindow(QtWidgets.QMainWindow):
             and isValid(self._render_thread)
             and self._render_thread.isRunning()
         ):
+            self._append_log("Shutdown: waiting render thread...")
             self._render_thread.quit()
-            self._render_thread.wait(1000)
+            start_time = time.monotonic()
+            while self._render_thread.isRunning() and (time.monotonic() - start_time) < 10.0:
+                self._render_thread.wait(100)
+                QtWidgets.QApplication.processEvents()
+            if self._render_thread.isRunning():
+                self._append_log(
+                    "Shutdown: render thread did not exit in time; keeping references to avoid QThread destroyed"
+                )
+                self.status_bar.showMessage("正在退出：等待后台计算结束…")
+                return False
         self._cleanup_retired_threads(force=True)
+        return True
+
+    def closeEvent(self, event: QtGui.QCloseEvent) -> None:
+        if not self.shutdown():
+            event.ignore()
+            return
         for view in self.projection_views.values():
             view.plotter.close()
         super().closeEvent(event)
@@ -1452,6 +1646,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 QtCore.Qt.ItemDataRole.UserRole
             )
 
+        self._update_explanation_panel()
         self.status_bar.showMessage(f"模式={self.state.projection_mode} | 质量=空闲")
 
         change_kind = self._detect_change_kind()
@@ -1526,16 +1721,22 @@ class MainWindow(QtWidgets.QMainWindow):
         return self.state.resolution, self.state.integral_samples
 
     def _schedule_render(self, quality_label: str) -> None:
+        if self._shutting_down:
+            return
         self._pending_quality_label = quality_label
         if self._render_timer.isActive():
             return
         self._render_timer.start(60)
 
     def _trigger_scheduled_render(self) -> None:
+        if self._shutting_down:
+            return
         self._start_render(self._pending_quality_label, "scheduled")
 
     def _start_render(self, quality_label: str, reason: str) -> None:
         if not self.isVisible():
+            return
+        if self._shutting_down:
             return
 
         if (
@@ -1546,11 +1747,15 @@ class MainWindow(QtWidgets.QMainWindow):
             and self._render_thread.isRunning()
         ):
             self._pending_render_request = (quality_label, reason)
-            should_cancel = reason == "release" or quality_label == "最终"
-            if should_cancel:
-                self._cancel_event.set()
-            else:
-                _ = quality_label
+            self._pending_after_finish = True
+            self._cancel_event.set()
+            try:
+                self._render_thread.requestInterruption()
+            except RuntimeError:
+                pass
+            self._append_log(
+                "Render request skipped: previous render still running (cancel requested)"
+            )
             return
 
         self._render_request_id += 1
@@ -1559,7 +1764,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._extent_retry_request_id = request_id
         self._extent_retry_attempted = reason == "extent-retry"
         self._cancel_event = threading.Event()
-        self._clear_views()
+        self._clear_views("计算中...")
 
         orbital = get_orbital_by_id(self.state.orbital_id)
         mode_key = self.state.projection_mode_key
@@ -1648,6 +1853,23 @@ class MainWindow(QtWidgets.QMainWindow):
             m="命中" if (info["mesh_hit_pos"] and info["mesh_hit_neg"]) else "未命中",
         )
         self._update_status(info, info["view_index"], cache_text)
+        self._append_log(
+            _log_event(
+                "view_status",
+                view_id=view_id,
+                resolution=info.get("resolution"),
+                samples=info.get("samples"),
+                extent=round(float(info.get("extent", self._extent)), 2)
+                if info.get("extent") is not None
+                else round(self._extent, 2),
+                mesh_hit_pos=info.get("mesh_hit_pos"),
+                mesh_hit_neg=info.get("mesh_hit_neg"),
+                mesh_pos_reason=info.get("mesh_pos_reason"),
+                mesh_neg_reason=info.get("mesh_neg_reason"),
+                strict_cancelled=info.get("strict_cancelled"),
+                strict_empty_reason=info.get("strict_empty_reason"),
+            )
+        )
 
         mesh_pos_data = mesh_pos if isinstance(mesh_pos, tuple) else None
         mesh_neg_data = mesh_neg if isinstance(mesh_neg, tuple) else None
@@ -1704,40 +1926,89 @@ class MainWindow(QtWidgets.QMainWindow):
         self.status_bar.showMessage(f"模式={self.state.projection_mode} | 质量=空闲")
 
     def _on_render_thread_finished(self) -> None:
+        thread = self._render_thread
+        worker = self._render_worker
         self._render_thread = None
         self._render_worker = None
-        try:
-            self._cleanup_retired_threads(force=False)
-        except RuntimeError:
-            self._retired_threads = []
-        if self._pending_render_request is not None:
+        if thread is not None and worker is not None:
+            self._retired_threads.append(thread)
+            self._retired_workers.append(worker)
+        self._cleanup_retired_threads()
+        if (
+            self._pending_after_finish
+            and self._pending_render_request is not None
+            and not self._shutting_down
+        ):
             quality_label, reason = self._pending_render_request
             self._pending_render_request = None
-            self._start_render(quality_label, reason)
+            self._pending_after_finish = False
+            self._start_render(quality_label, "deferred")
+        else:
+            self._pending_render_request = None
+            self._pending_after_finish = False
 
-    def _cleanup_retired_threads(self, force: bool) -> None:
-        remaining: list[tuple[QtCore.QThread, RenderWorker, threading.Event]] = []
-        for thread, worker, cancel_event in self._retired_threads:
+    def _cleanup_retired_threads(self, force: bool = False) -> None:
+        remaining_threads: list[QtCore.QThread] = []
+        remaining_workers: list[QtCore.QObject] = []
+        count = min(len(self._retired_threads), len(self._retired_workers))
+        for idx in range(count):
+            thread = self._retired_threads[idx]
+            worker = self._retired_workers[idx]
             if thread is None or not isValid(thread):
                 continue
             try:
                 running = thread.isRunning()
-            except RuntimeError:
-                continue
-            if force:
-                cancel_event.set()
-                if running:
-                    thread.quit()
-                    thread.wait(1000)
+            except RuntimeError as exc:
+                self._append_log(f"cleanup_retired_thread_check_failed: {exc}")
+                remaining_threads.append(thread)
+                if worker is not None:
+                    remaining_workers.append(worker)
                 continue
             if running:
-                remaining.append((thread, worker, cancel_event))
-            else:
-                try:
-                    thread.quit()
-                except RuntimeError:
+                if force:
+                    try:
+                        thread.quit()
+                    except RuntimeError as exc:
+                        self._append_log(f"cleanup_retired_thread_quit_failed: {exc}")
+                    try:
+                        thread.wait(10000)
+                    except RuntimeError as exc:
+                        self._append_log(f"cleanup_retired_thread_wait_failed: {exc}")
+                    try:
+                        running = thread.isRunning()
+                    except RuntimeError as exc:
+                        self._append_log(f"cleanup_retired_thread_check_failed: {exc}")
+                        remaining_threads.append(thread)
+                        if worker is not None:
+                            remaining_workers.append(worker)
+                        continue
+                    if running:
+                        remaining_threads.append(thread)
+                        if worker is not None:
+                            remaining_workers.append(worker)
+                        continue
+                else:
+                    remaining_threads.append(thread)
+                    if worker is not None:
+                        remaining_workers.append(worker)
                     continue
-        self._retired_threads = remaining
+            try:
+                thread.deleteLater()
+            except RuntimeError as exc:
+                self._append_log(f"cleanup_retired_thread_delete_failed: {exc}")
+                remaining_threads.append(thread)
+                if worker is not None:
+                    remaining_workers.append(worker)
+                continue
+            if worker is not None and isValid(worker):
+                try:
+                    worker.deleteLater()
+                except RuntimeError as exc:
+                    self._append_log(f"cleanup_retired_worker_delete_failed: {exc}")
+                    remaining_threads.append(thread)
+                    remaining_workers.append(worker)
+        self._retired_threads = remaining_threads
+        self._retired_workers = remaining_workers
 
     def _update_status(self, info: dict, view_index: int, cache_text: str) -> None:
         mode = info["mode_label"] if "mode_label" in info else self.state.projection_mode
@@ -1753,7 +2024,10 @@ class MainWindow(QtWidgets.QMainWindow):
     def _snap_resolution(self, target: int) -> int:
         return min(self._allowed_resolutions, key=lambda res: abs(res - target))
 
-    def _clear_views(self) -> None:
+    def _clear_views(self, overlay_text: str | None = None) -> None:
         for view in self.projection_views.values():
             view.set_meshes(None, None, 1.0)
-            view.set_empty_message_visible(False)
+            if overlay_text:
+                view.set_overlay(overlay_text)
+            else:
+                view.set_empty_message_visible(False)
